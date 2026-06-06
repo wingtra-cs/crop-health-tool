@@ -1,0 +1,13 @@
+# Wingtra brand theme for the web app. This file IS committed (it is not secret).
+# Sun Orange primary accent, light Uranus canvas, dark Mercury text.
+# Place at .streamlit/config.toml in the repo.
+
+[theme]
+primaryColor = "#F46F29"
+backgroundColor = "#EDF2F2"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1C2E36"
+
+[server]
+# Keep uploads modest; this app does not accept ortho uploads, only small AOI files.
+maxUploadSize = 20
