@@ -3,12 +3,12 @@ streamlit_app.py — Crop Health Visualization and Classification Tool
 
 Hosted web front-end (Streamlit Community Cloud).
 
-This version wires processing.py into the UI: branding + password gate, an
-ortho dropdown driven live by the R2 bucket, then the interactive analysis —
-bare-earth threshold (Otsu + slider), vegetation-index map (adaptive colour
-scale), relative-vigour classification (quartile / k-means, 3–5 classes), a
-per-class table, and three downloads (full ortho via presigned URL; the selected
-index as GeoTIFF; the classes as a zipped shapefile).
+Wires processing.py into the UI: branding + password gate, an ortho dropdown
+driven live by the R2 bucket, then the interactive analysis — bare-earth
+threshold (Otsu + slider) with a red ground-mask check, vegetation-index map
+(adaptive colour scale), relative-vigour classification (quartile / k-means,
+3–5 classes), a per-class table, and three downloads (full ortho via presigned
+URL; the selected index as GeoTIFF; the classes as a zipped shapefile).
 
 The map overlay (Leaflet) and AOI subsetting are added in the next step. Storage
 access lives in r2.py; all analysis/rendering lives in processing.py.
@@ -23,6 +23,8 @@ Secrets (Community Cloud "Secrets" box, or local .streamlit/secrets.toml):
     bucket     = "ptpn-bucket"
 
 Branding: optional logo at assets/wingtra_logo.png (committed; not a secret).
+Shown once, in the sidebar chrome (st.logo). The page header is a titled bar
+with an orange rule, not a second logo.
 """
 
 import io
@@ -39,27 +41,49 @@ import processing as proc
 APP_TITLE = "Crop Health Visualization and Classification Tool"
 LOGO_PATH = "assets/wingtra_logo.png"
 
+# Wingtra palette for the header rule.
+MERCURY = "#1C2E36"
+SUN_ORANGE = "#F46F29"
+URANUS = "#A3BABD"
+
+_HEADER_CSS = f"""
+<style>
+  .ch-header {{
+      border-bottom: 3px solid {SUN_ORANGE};
+      padding: 2px 0 10px 0;
+      margin: 0 0 14px 0;
+  }}
+  .ch-header h1 {{
+      color: {MERCURY};
+      font-size: 30px; font-weight: 800; margin: 0; line-height: 1.15;
+  }}
+  .ch-header .ch-sub {{
+      color: #5b6b72; font-size: 14px; font-weight: 500; margin-top: 2px;
+  }}
+</style>
+"""
+
 
 # --------------------------------------------------------------------------- #
 #  Branding
+#  Single logo in the sidebar chrome (st.logo). The page header is a titled bar
+#  with an orange rule — a clear visual division, not a second logo.
 # --------------------------------------------------------------------------- #
-def render_brand(show_title=True):
-    has_logo = os.path.exists(LOGO_PATH)
-    if has_logo:
+def render_sidebar_logo():
+    if os.path.exists(LOGO_PATH):
         try:
             st.logo(LOGO_PATH)
         except Exception:
             pass
-    if not show_title:
-        return
-    if has_logo:
-        c1, c2 = st.columns([1, 6], vertical_alignment="center")
-        with c1:
-            st.image(LOGO_PATH, width=110)
-        with c2:
-            st.title(APP_TITLE)
-    else:
-        st.title(APP_TITLE)
+
+
+def render_header(subtitle=None):
+    st.markdown(_HEADER_CSS, unsafe_allow_html=True)
+    sub = f'<div class="ch-sub">{subtitle}</div>' if subtitle else ""
+    st.markdown(
+        f'<div class="ch-header"><h1>{APP_TITLE}</h1>{sub}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -68,7 +92,8 @@ def render_brand(show_title=True):
 def check_password():
     if st.session_state.get("auth_ok"):
         return True
-    render_brand()
+    render_sidebar_logo()
+    render_header()
     st.caption("Enter the access password to continue.")
     pw = st.text_input("Password", type="password", key="pw_input")
     if pw:
@@ -85,9 +110,6 @@ def check_password():
 #  Per-ortho threshold state: re-seed Otsu when the dataset / mask index changes
 # --------------------------------------------------------------------------- #
 def setup_threshold(bundle, mask_index_name):
-    """Compute the mask-index values, Otsu (memoised per dataset+index), and the
-    slider bounds; initialise the slider value once per signature. Returns
-    (mvals, otsu, lo, hi)."""
     valid = bundle["valid"]
     mask_full = bundle["mask_ndvi"] if mask_index_name == "NDVI" \
         else proc.index_array(bundle, mask_index_name)
@@ -118,7 +140,8 @@ def main():
     if not check_password():
         st.stop()
 
-    render_brand()
+    render_sidebar_logo()
+    render_header()
 
     # ---- Sidebar: dataset + options ---------------------------------- #
     with st.sidebar:
@@ -190,7 +213,7 @@ def main():
 
     st.subheader(meta.get("name", slug))
 
-    # ---- Ground threshold (Otsu + slider) ---------------------------- #
+    # ---- Ground threshold (Otsu + slider) + red mask check ----------- #
     threshold = None
     if ground_mask_on:
         mvals, otsu, lo, hi = setup_threshold(bundle, mask_index_name)
@@ -210,8 +233,17 @@ def main():
                     st.session_state["mask_thr"] = float(min(max(round(otsu, 3),
                                                                  lo), hi))
                     st.rerun()
+
             st.pyplot(proc.fig_mask_histogram(mvals, otsu, threshold,
                                               mask_index_name))
+
+            # red ground-mask check, directly under the histogram
+            valid = bundle["valid"]
+            veg_preview = proc.canopy_mask(bundle, True, mask_index_name, threshold)
+            st.pyplot(proc.fig_mask_check(bundle, valid, veg_preview))
+            st.caption("Red marks pixels removed as bare ground at the current "
+                       "threshold. Raise it if red covers canopy; lower it if soil / "
+                       "roads / gaps aren't caught.")
 
     # ---- Build the analysis mask + index values --------------------- #
     idx = proc.index_array(bundle, index_name)
@@ -280,7 +312,6 @@ def main():
     st.markdown("### Downloads")
     d1, d2, d3 = st.columns(3)
 
-    # (1) full ortho — presigned direct-from-storage link
     with d1:
         try:
             url = r2.ortho_download_url(bundle, ttl=900)
@@ -289,7 +320,6 @@ def main():
         except Exception as e:
             st.caption(f"Ortho link unavailable: {e}")
 
-    # (2) index GeoTIFF — generated from the display-res array
     with d2:
         try:
             tif = proc.index_geotiff_bytes(idx, mask, meta)
@@ -300,7 +330,6 @@ def main():
         except Exception as e:
             st.caption(f"Index export unavailable: {e}")
 
-    # (3) classes as a zipped shapefile
     with d3:
         if st.button("Prepare class shapefile", use_container_width=True):
             try:

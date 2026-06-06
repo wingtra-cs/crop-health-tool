@@ -12,6 +12,7 @@ This is a crop-neutral port of the validated offline logic:
   * adaptive (per-block, percentile) colour limits so within-map variation shows
   * quartile / k-means relative-vigour classification (labels low -> high)
   * colourised index image (RdYlGn, transparent off-canopy) for display/overlay
+  * red ground-mask check over the true-colour preview
   * index GeoTIFF and class shapefile (zipped) writers for download
 
 Nothing here reads the multi-GB ortho; it all runs on the small precomputed
@@ -260,6 +261,64 @@ def fig_mask_histogram(mvals, otsu, threshold, name):
     ax.set_ylabel("Pixel count")
     ax.set_title(f"{name} over all pixels — left of the line is masked as ground")
     ax.legend(fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    return fig
+
+
+def _decode_rgb_png(rgb_png_bytes, shape_hw):
+    """Decode the bundle's native-grid rgb.png to a float (H,W,3) array in 0..1.
+    Returns None if bytes are missing or the size doesn't match the index grid."""
+    if not rgb_png_bytes:
+        return None
+    try:
+        im = Image.open(io.BytesIO(rgb_png_bytes)).convert("RGB")
+        arr = np.asarray(im, dtype="float32") / 255.0
+    except Exception:
+        return None
+    if arr.shape[0] != shape_hw[0] or arr.shape[1] != shape_hw[1]:
+        # Grid mismatch (e.g. rgb.png saved at a different size) — resize to match
+        # so the red overlay lines up with the mask/index arrays.
+        try:
+            im2 = Image.fromarray((arr * 255).astype("uint8")).resize(
+                (shape_hw[1], shape_hw[0]))
+            arr = np.asarray(im2, dtype="float32") / 255.0
+        except Exception:
+            return None
+    return arr
+
+
+def fig_mask_check(bundle, valid, veg):
+    """True-colour reference with pixels masked as ground tinted red, so the user
+    can eyeball whether bare earth (not canopy) is being removed. Uses the bundle's
+    native-grid rgb.png. 'valid' = real pixels; 'veg' = kept-as-canopy pixels;
+    (valid & ~veg) = removed-as-ground, shown red."""
+    shape_hw = valid.shape
+    rgb = _decode_rgb_png(bundle.get("rgb_png"), shape_hw)
+    if rgb is None:
+        # No preview available — return a small informational figure rather than None
+        fig, ax = plt.subplots(figsize=(6, 1.2))
+        ax.text(0.5, 0.5, "No true-colour preview in this dataset for the mask check.",
+                ha="center", va="center", fontsize=10)
+        ax.axis("off")
+        return fig
+
+    bg = 0.5
+    base = np.clip(rgb.copy(), 0, 1)
+    base[~valid] = bg
+
+    over = np.clip(rgb.copy(), 0, 1)
+    over[~valid] = bg
+    ground = valid & (~veg)                      # real pixels removed as ground
+    red = np.array([0.86, 0.12, 0.12], dtype="float32")
+    over[ground] = 0.45 * over[ground] + 0.55 * red
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.4))
+    axes[0].imshow(base)
+    axes[0].set_title("True colour", fontsize=12)
+    axes[0].axis("off")
+    axes[1].imshow(over)
+    axes[1].set_title("Masked as ground (red)", fontsize=12)
+    axes[1].axis("off")
     fig.tight_layout()
     return fig
 
