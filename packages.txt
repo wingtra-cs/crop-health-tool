@@ -1,0 +1,9 @@
+# System (apt) packages installed by Streamlit Community Cloud before pip.
+# Safety net for rasterio / geopandas: pip wheels usually bundle GDAL, but if a
+# deploy fails with a GDAL/GEOS/PROJ error, these provide the system libraries.
+# Harmless to keep; remove if you prefer a leaner build and the deploy is fine
+# without them.
+gdal-bin
+libgdal-dev
+libgeos-dev
+libproj-dev

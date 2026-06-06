@@ -1,0 +1,26 @@
+# --- Secrets: NEVER commit these ---
+.streamlit/secrets.toml
+
+# --- Data: lives in R2, never in Git ---
+bundles/
+*.tif
+*.tiff
+*.npy
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,16 @@
+# Crop Health Visualization and Classification Tool — web app dependencies.
+# Pin exact versions once the deploy is confirmed working, so a library update
+# can't silently change behaviour on a redeploy. Loose for now during the build.
+
+streamlit
+boto3
+numpy
+pillow
+rasterio
+geopandas
+scikit-learn
+
+# Added in later build steps when those features land:
+# streamlit-folium      # map overlay + AOI draw
+# scikit-image          # (only if crown detection is ported to the web app)
+# scipy                 # (pulled in by scikit-image / scikit-learn)
