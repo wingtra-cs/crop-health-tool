@@ -2,9 +2,8 @@ streamlit
 boto3
 numpy
 pillow
+matplotlib
 rasterio
 geopandas
 scikit-learn
-streamlit-folium
-scikit-image
 scipy
