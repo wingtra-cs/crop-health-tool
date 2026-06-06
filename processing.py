@@ -14,7 +14,8 @@ Crop-neutral port of the validated offline logic:
   * colourised index / class images for display and for the web map overlay
   * red ground-mask check over the true-colour preview
   * AOI reading (KML / GeoJSON / zipped shapefile) + rasterisation
-  * a folium web map (satellite basemap + index/class overlays + footprint + AOI)
+  * a folium web map (satellite basemap + index/class overlays + footprint + AOI
+    + an on-map legend for the index gradient and the vigour classes)
   * index GeoTIFF and class shapefile (zipped) writers for download
 
 Nothing here reads the multi-GB ortho; it all runs on the small precomputed
@@ -33,7 +34,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm, to_rgb
+from matplotlib.colors import ListedColormap, BoundaryNorm, to_rgb, to_hex
 from PIL import Image
 
 import rasterio
@@ -83,6 +84,9 @@ CLASS_LABELS = {
     4: ["Lowest", "Low", "High", "Highest"],
     5: ["Lowest", "Low", "Moderate", "High", "Highest"],
 }
+
+# Gradient stops used for the index colour ramp legend (approximates RdYlGn).
+_RAMP_STOPS = ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"]
 
 
 def index_array(bundle, name):
@@ -178,7 +182,7 @@ def class_palette(n):
     if n <= 5:
         idx = np.linspace(0, 4, n).round().astype(int)
         return [CLASS_COLORS[i] for i in idx]
-    return [plt.get_cmap("RdYlGn")(i / (n - 1)) for i in range(n)]
+    return [to_hex(plt.get_cmap("RdYlGn")(i / (n - 1))) for i in range(n)]
 
 
 # --------------------------------------------------------------------------- #
@@ -198,12 +202,16 @@ def adaptive_range(values, vmin_fallback, vmax_fallback, pclip=(2, 98)):
 
 
 def colorize_index(idx2d, mask, vmin, vmax):
-    """RdYlGn RGBA uint8 image of an index array; off-mask pixels transparent.
-    Returns a PIL image at the array's own resolution."""
+    """RdYlGn RGBA uint8 image of an index array. Alpha is set EXPLICITLY from the
+    mask AND finiteness, so nodata / off-canopy pixels are fully transparent (no
+    black collar) regardless of how the colormap maps NaN. Returns a PIL image."""
     cmap = plt.get_cmap("RdYlGn")
-    norm = np.clip((idx2d - vmin) / max(vmax - vmin, 1e-6), 0, 1)
-    rgba = (cmap(norm) * 255).astype("uint8")
-    rgba[~mask, 3] = 0
+    norm = (idx2d.astype("float64") - vmin) / max(vmax - vmin, 1e-6)
+    norm = np.clip(np.nan_to_num(norm, nan=0.0), 0.0, 1.0)
+    rgba = (cmap(norm) * 255).astype("uint8")          # (H, W, 4)
+    keep = mask & np.isfinite(idx2d)
+    rgba[..., 3] = np.where(keep, 255, 0).astype("uint8")
+    rgba[~keep, :3] = 0                                # zero RGB where transparent
     return Image.fromarray(rgba, mode="RGBA")
 
 
@@ -230,8 +238,7 @@ def png_data_uri(img):
 
 
 def fig_index_map(idx2d, mask, name, vmin, vmax, region="analysed area"):
-    """Static matplotlib index map — used as a fallback when the web map can't
-    render (e.g. folium unavailable or the dataset has no CRS/bounds)."""
+    """Static matplotlib index map — fallback when the web map can't render."""
     cmap = plt.get_cmap("RdYlGn").copy()
     cmap.set_bad(alpha=0.0)
     disp = np.ma.masked_array(idx2d, mask=~mask)
@@ -313,8 +320,7 @@ def _decode_rgb_png(rgb_png_bytes, shape_hw):
 
 def fig_mask_check(bundle, valid, veg):
     """True-colour reference with pixels masked as ground tinted red, so the user
-    can eyeball whether bare earth (not canopy) is being removed. Uses the bundle's
-    native-grid rgb.png. (valid & ~veg) = removed-as-ground, shown red."""
+    can eyeball whether bare earth (not canopy) is being removed."""
     shape_hw = valid.shape
     rgb = _decode_rgb_png(bundle.get("rgb_png"), shape_hw)
     if rgb is None:
@@ -346,8 +352,7 @@ def fig_mask_check(bundle, valid, veg):
 
 
 # --------------------------------------------------------------------------- #
-#  Area of interest (AOI): read a vector, rasterise to the display grid, and
-#  reproject to WGS84 for drawing on the web map.
+#  Area of interest (AOI)
 # --------------------------------------------------------------------------- #
 def aoi_from_vector(name, data_bytes, raster_crs):
     """Read KML / GeoJSON / zipped-shapefile bytes, reproject to the raster CRS,
@@ -381,7 +386,7 @@ def aoi_from_vector(name, data_bytes, raster_crs):
     if gdf.empty:
         raise ValueError("No features found in the AOI file.")
     if gdf.crs is None:
-        gdf = gdf.set_crs(4326)                  # KML / loose files: assume WGS84
+        gdf = gdf.set_crs(4326)
     gdf = gdf.to_crs(raster_crs)
     try:
         return gdf.geometry.union_all()
@@ -405,8 +410,7 @@ def rasterize_aoi(geom, out_shape, transform):
 
 
 def aoi_to_4326_geojson(geom, raster_crs):
-    """Reproject a raster-CRS shapely geom to EPSG:4326 and return a geojson mapping
-    suitable for folium.GeoJson. None on failure."""
+    """Reproject a raster-CRS shapely geom to EPSG:4326; return a geojson mapping."""
     try:
         import geopandas as gpd
     except Exception:
@@ -421,11 +425,42 @@ def aoi_to_4326_geojson(geom, raster_crs):
 # --------------------------------------------------------------------------- #
 #  Web map (folium): satellite basemap + index/class overlays + footprint + AOI
 # --------------------------------------------------------------------------- #
+def _legend_html(index_name, vlo, vhi, n_classes):
+    """A small fixed legend panel: index gradient bar + class colour swatches.
+    Always visible so both overlays stay interpretable when toggled."""
+    swatches = ""
+    for c, lab in zip(class_palette(n_classes), class_label_set(n_classes)):
+        hexc = c if isinstance(c, str) else to_hex(c)
+        swatches += (
+            f'<div style="display:flex;align-items:center;margin:2px 0;">'
+            f'<span style="background:{hexc};width:13px;height:13px;display:inline-block;'
+            f'margin-right:6px;border:1px solid #888;"></span>{lab}</div>')
+    ramp = ", ".join(_RAMP_STOPS)
+    return f"""
+    <div style="position: fixed; bottom: 22px; right: 12px; z-index: 9999;
+        background: rgba(255,255,255,0.93); padding: 9px 11px;
+        border: 1px solid #bbb; border-radius: 6px; font-size: 12px;
+        color: #1C2E36; font-family: sans-serif;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.25);">
+      <div style="font-weight:700; margin-bottom:3px;">{index_name} index</div>
+      <div style="background: linear-gradient(to right, {ramp});
+          width:150px; height:12px; border:1px solid #888;"></div>
+      <div style="display:flex; justify-content:space-between; width:150px;
+          font-size:11px; margin-top:1px;">
+        <span>{vlo:.2f}</span><span>low → high</span><span>{vhi:.2f}</span>
+      </div>
+      <div style="font-weight:700; margin:8px 0 3px;">Vigour classes</div>
+      {swatches}
+    </div>"""
+
+
 def build_map(bundle, idx, mask, index_name, vlo, vhi,
               class_grid=None, n_classes=None, aoi_geojson=None):
     """Return a folium.Map, or None if folium is unavailable or the dataset has no
     WGS84 bounds. Overlays are placed with a lat/lon image overlay — placement is
-    approximate (fine for a scouting aid; exact georeferencing is in the downloads)."""
+    approximate (fine for a scouting aid; exact georeferencing is in the downloads).
+    The ortho-footprint outline is drawn ONLY when an AOI is present (to frame the
+    AOI); without an AOI the overlay itself shows the extent, so no border is drawn."""
     bounds = bundle.get("bounds")
     if not bounds or "south" not in bounds:
         return None
@@ -448,27 +483,24 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     folium.TileLayer("OpenStreetMap", name="Street map",
                      overlay=False, control=True).add_to(m)
 
-    # index overlay (shown by default)
     idx_img = colorize_index(idx, mask, vlo, vhi)
     folium.raster_layers.ImageOverlay(
-        image=png_data_uri(idx_img), bounds=img_bounds, opacity=0.80,
+        image=png_data_uri(idx_img), bounds=img_bounds, opacity=0.82,
         name=f"{index_name} index", interactive=False, zindex=1,
     ).add_to(m)
 
-    # class overlay (hidden by default; toggle in the layer control)
     if class_grid is not None and n_classes:
         cls_img = colorize_classes(class_grid, n_classes)
         folium.raster_layers.ImageOverlay(
-            image=png_data_uri(cls_img), bounds=img_bounds, opacity=0.80,
+            image=png_data_uri(cls_img), bounds=img_bounds, opacity=0.82,
             name="Vigour classes", interactive=False, show=False, zindex=2,
         ).add_to(m)
 
-    # ortho footprint
-    folium.Rectangle(bounds=img_bounds, color="#1C2E36", weight=2,
-                     fill=False, opacity=0.9).add_to(m)
-
-    # AOI outline (if uploaded)
+    # Footprint outline + AOI: only when an AOI is uploaded. A thin light dashed
+    # line for the full extent, the AOI in orange.
     if aoi_geojson is not None:
+        folium.Rectangle(bounds=img_bounds, color="#ffffff", weight=1.5,
+                         fill=False, opacity=0.7, dash_array="6,6").add_to(m)
         folium.GeoJson(
             aoi_geojson, name="AOI",
             style_function=lambda _f: {"color": "#F46F29", "weight": 2.5,
@@ -477,6 +509,10 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
 
     folium.LayerControl(collapsed=False).add_to(m)
     m.fit_bounds(img_bounds)
+
+    if n_classes:
+        m.get_root().html.add_child(
+            folium.Element(_legend_html(index_name, vlo, vhi, n_classes)))
     return m
 
 
@@ -514,11 +550,7 @@ def index_geotiff_bytes(idx2d, mask, meta):
 
 
 def classes_shapefile_zip(class_grid, n_classes, meta, sieve_min_pixels=8):
-    """Polygonise the class raster and return a ZIPPED shapefile (bytes).
-
-    Polygons carry the integer class (0..n-1) and its relative-vigour label. A
-    small sieve drops specks below sieve_min_pixels so the file is usable in QGIS.
-    Requires rasterio.features + geopandas; raises if geopandas is unavailable."""
+    """Polygonise the class raster and return a ZIPPED shapefile (bytes)."""
     try:
         import geopandas as gpd
         from shapely.geometry import shape
