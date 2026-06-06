@@ -3,15 +3,17 @@ streamlit_app.py — Crop Health Visualization and Classification Tool
 
 Hosted web front-end (Streamlit Community Cloud).
 
-Wires processing.py into the UI: branding + password gate, an ortho dropdown
-driven live by the R2 bucket, then the interactive analysis — bare-earth
-threshold (Otsu + slider) with a red ground-mask check, vegetation-index map
-(adaptive colour scale), relative-vigour classification (quartile / k-means,
-3–5 classes), a per-class table, and three downloads (full ortho via presigned
-URL; the selected index as GeoTIFF; the classes as a zipped shapefile).
+Branding + password gate, an ortho dropdown driven live by the R2 bucket, then
+the interactive analysis:
+  * bare-earth threshold (Otsu + slider) with a red ground-mask check
+  * optional AOI subsetting (upload KML / GeoJSON / zipped shapefile)
+  * a web map (satellite basemap) with the vegetation index and the vigour
+    classes as toggleable overlays, the ortho footprint, and the AOI outline
+  * relative-vigour classification (quartile / k-means, 3–5 classes) + table
+  * three downloads: full ortho (presigned URL), the index as GeoTIFF, and the
+    classes as a zipped shapefile
 
-The map overlay (Leaflet) and AOI subsetting are added in the next step. Storage
-access lives in r2.py; all analysis/rendering lives in processing.py.
+Storage access lives in r2.py; all analysis/rendering lives in processing.py.
 
 Secrets (Community Cloud "Secrets" box, or local .streamlit/secrets.toml):
 
@@ -22,9 +24,8 @@ Secrets (Community Cloud "Secrets" box, or local .streamlit/secrets.toml):
     secret_key = "..."
     bucket     = "ptpn-bucket"
 
-Branding: optional logo at assets/wingtra_logo.png (committed; not a secret).
-Shown once, in the sidebar chrome (st.logo). The page header is a titled bar
-with an orange rule, not a second logo.
+Branding: optional logo at assets/wingtra_logo.png (committed; not a secret),
+shown once in the sidebar chrome (st.logo). The page header is a titled bar.
 """
 
 import io
@@ -37,25 +38,29 @@ import streamlit as st
 import r2
 import processing as proc
 
+# Web-map renderer is optional; the app falls back to static maps without it.
+try:
+    from streamlit_folium import st_folium
+    HAVE_FOLIUM = True
+except Exception:
+    HAVE_FOLIUM = False
+
 
 APP_TITLE = "Crop Health Visualization and Classification Tool"
 LOGO_PATH = "assets/wingtra_logo.png"
 
-# Wingtra palette for the header rule.
 MERCURY = "#1C2E36"
 SUN_ORANGE = "#F46F29"
-URANUS = "#A3BABD"
 
 _HEADER_CSS = f"""
 <style>
   .ch-header {{
       border-bottom: 3px solid {SUN_ORANGE};
-      padding: 2px 0 10px 0;
-      margin: 0 0 14px 0;
+      padding: 2px 0 10px 0; margin: 0 0 14px 0;
   }}
   .ch-header h1 {{
-      color: {MERCURY};
-      font-size: 30px; font-weight: 800; margin: 0; line-height: 1.15;
+      color: {MERCURY}; font-size: 30px; font-weight: 800;
+      margin: 0; line-height: 1.15;
   }}
   .ch-header .ch-sub {{
       color: #5b6b72; font-size: 14px; font-weight: 500; margin-top: 2px;
@@ -66,8 +71,6 @@ _HEADER_CSS = f"""
 
 # --------------------------------------------------------------------------- #
 #  Branding
-#  Single logo in the sidebar chrome (st.logo). The page header is a titled bar
-#  with an orange rule — a clear visual division, not a second logo.
 # --------------------------------------------------------------------------- #
 def render_sidebar_logo():
     if os.path.exists(LOGO_PATH):
@@ -80,10 +83,8 @@ def render_sidebar_logo():
 def render_header(subtitle=None):
     st.markdown(_HEADER_CSS, unsafe_allow_html=True)
     sub = f'<div class="ch-sub">{subtitle}</div>' if subtitle else ""
-    st.markdown(
-        f'<div class="ch-header"><h1>{APP_TITLE}</h1>{sub}</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(f'<div class="ch-header"><h1>{APP_TITLE}</h1>{sub}</div>',
+                unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -110,28 +111,26 @@ def check_password():
 #  Threshold helpers
 # --------------------------------------------------------------------------- #
 def _reset_threshold(value):
-    """Reset the threshold slider. Runs as an on_click CALLBACK — i.e. before the
-    slider widget is recreated on the next run — so assigning to the widget's
-    session_state key is legal. (Assigning to a widget-backed key AFTER the widget
-    has been instantiated in the same run raises StreamlitAPIException.)"""
+    """on_click CALLBACK — runs before the slider is recreated, so assigning to the
+    widget's session_state key is legal (assigning after the widget exists raises)."""
     st.session_state["mask_thr"] = value
 
 
-def setup_threshold(bundle, mask_index_name):
-    """Compute mask-index values, Otsu (memoised per dataset+index), slider bounds;
-    seed the slider value once per signature. Returns (mvals, otsu, lo, hi).
-
-    The seeding assigns st.session_state['mask_thr'] only when it has NOT yet been
-    set for this signature, and always BEFORE the slider widget is created later in
-    main(), so it doesn't collide with the widget."""
+def setup_threshold(bundle, mask_index_name, aoi_mask=None):
+    """Mask-index values (within valid & AOI), Otsu (memoised per dataset+index+AOI),
+    slider bounds; seed the slider value once per signature. Returns
+    (mvals, otsu, lo, hi)."""
     valid = bundle["valid"]
+    if aoi_mask is not None:
+        valid = valid & aoi_mask
     mask_full = bundle["mask_ndvi"] if mask_index_name == "NDVI" \
         else proc.index_array(bundle, mask_index_name)
     mvals = mask_full[valid & np.isfinite(mask_full)]
     if mvals.size == 0:
         return mvals, None, None, None
 
-    sig = (bundle["slug"], mask_index_name)
+    aoi_key = int(aoi_mask.sum()) if aoi_mask is not None else 0
+    sig = (bundle["slug"], mask_index_name, aoi_key)
     if st.session_state.get("otsu_sig") != sig:
         st.session_state["otsu_sig"] = sig
         st.session_state["otsu_val"] = proc.otsu_threshold(mvals)
@@ -139,7 +138,7 @@ def setup_threshold(bundle, mask_index_name):
 
     lo, hi = proc.slider_bounds(mvals)
     seed = float(min(max(round(otsu, 3), lo), hi))
-    tsig = (bundle["slug"], mask_index_name, lo, hi)
+    tsig = (bundle["slug"], mask_index_name, aoi_key, lo, hi)
     if st.session_state.get("thr_sig") != tsig or "mask_thr" not in st.session_state:
         st.session_state["thr_sig"] = tsig
         st.session_state["mask_thr"] = seed
@@ -206,6 +205,13 @@ def main():
                                    "K-means = natural breaks.")
         n_classes = st.slider("Number of classes", 3, 5, 4)
 
+        st.header("Area of interest (optional)")
+        aoi_file = st.file_uploader(
+            "Restrict to an AOI — KML, GeoJSON, or zipped shapefile",
+            type=["kml", "geojson", "json", "zip"],
+            help="Clip the analysis to a sub-area. The AOI is drawn on the map for "
+                 "context. Leave empty to analyse the whole orthomosaic.")
+
     selected = orthos[names.index(picked)]
     slug = selected["slug"]
 
@@ -228,12 +234,34 @@ def main():
 
     st.subheader(meta.get("name", slug))
 
+    # ---- AOI (optional) ---------------------------------------------- #
+    aoi_mask = None
+    aoi_geojson = None
+    if aoi_file is not None:
+        try:
+            geom = proc.aoi_from_vector(aoi_file.name, aoi_file.getvalue(),
+                                        meta.get("crs"))
+            transform = proc.affine_from_meta(meta)
+            shape_hw = tuple(meta.get("display_shape", bundle["valid"].shape))
+            m_ = proc.rasterize_aoi(geom, shape_hw, transform)
+            if m_ is not None and m_.sum() > 0:
+                aoi_mask = m_
+                aoi_geojson = proc.aoi_to_4326_geojson(geom, meta.get("crs"))
+                ha = (f"{int(aoi_mask.sum()) * px_area / 1e4:,.2f} ha"
+                      if px_area else f"{int(aoi_mask.sum()):,} px")
+                st.caption(f"AOI applied — analysis restricted to {ha}.")
+            else:
+                st.warning("The AOI doesn't overlap this orthomosaic — analysing the "
+                           "whole dataset instead.")
+        except Exception as e:
+            st.error(f"Could not read the AOI: {e}")
+
     # ---- Ground threshold (Otsu + slider) + red mask check ----------- #
     threshold = None
     if ground_mask_on:
-        mvals, otsu, lo, hi = setup_threshold(bundle, mask_index_name)
+        mvals, otsu, lo, hi = setup_threshold(bundle, mask_index_name, aoi_mask)
         if otsu is None:
-            st.warning("No valid pixels to threshold in this dataset.")
+            st.warning("No valid pixels to threshold in this dataset / AOI.")
             st.stop()
 
         with st.expander("Ground mask threshold", expanded=True):
@@ -244,41 +272,65 @@ def main():
                     min_value=lo, max_value=hi, step=0.005, key="mask_thr")
             with cbtn:
                 st.metric("Otsu auto", f"{otsu:.3f}")
-                # Reset via on_click callback so the assignment to the slider's
-                # session_state key happens BEFORE the slider is recreated.
                 st.button("Reset to Otsu", on_click=_reset_threshold,
                           args=(float(min(max(round(otsu, 3), lo), hi)),))
 
             st.pyplot(proc.fig_mask_histogram(mvals, otsu, threshold,
                                               mask_index_name))
 
-            # red ground-mask check, directly under the histogram
-            valid = bundle["valid"]
-            veg_preview = proc.canopy_mask(bundle, True, mask_index_name, threshold)
-            st.pyplot(proc.fig_mask_check(bundle, valid, veg_preview))
+            valid_eff = bundle["valid"] & aoi_mask if aoi_mask is not None \
+                else bundle["valid"]
+            veg_preview = proc.canopy_mask(bundle, True, mask_index_name,
+                                           threshold, aoi_mask=aoi_mask)
+            st.pyplot(proc.fig_mask_check(bundle, valid_eff, veg_preview))
             st.caption("Red marks pixels removed as bare ground at the current "
                        "threshold. Raise it if red covers canopy; lower it if soil / "
                        "roads / gaps aren't caught.")
 
-    # ---- Build the analysis mask + index values --------------------- #
+    # ---- Analysis mask + index values -------------------------------- #
     idx = proc.index_array(bundle, index_name)
-    mask = proc.canopy_mask(bundle, ground_mask_on, mask_index_name, threshold)
+    mask = proc.canopy_mask(bundle, ground_mask_on, mask_index_name, threshold,
+                            aoi_mask=aoi_mask)
     vals = idx[mask & np.isfinite(idx)]
     if vals.size == 0:
-        st.warning("No pixels to analyse — lower the ground threshold or turn the "
-                   "ground mask off.")
+        st.warning("No pixels to analyse — lower the ground threshold, clear the AOI, "
+                   "or turn the ground mask off.")
         st.stop()
 
     region = "vegetated canopy" if ground_mask_on else "analysed area"
     vlo, vhi = proc.adaptive_range(vals, info["vmin"], info["vmax"])
 
-    # ---- Index map --------------------------------------------------- #
-    st.markdown(f"### {index_name} map")
-    st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi, region=region))
-    st.caption(f"Colour scale stretched to this dataset's {index_name} range "
-               f"({vlo:.2f}–{vhi:.2f}, 2–98th percentile) to bring out relative "
-               "variation — qualitative and within-map only, not comparable "
-               "between datasets.")
+    # ---- Classification (computed before the map so classes can overlay) #
+    try:
+        labels, edges = proc.classify(vals, method=method, n_classes=n_classes)
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+    class_grid = np.full(idx.shape, -1, dtype="int16")
+    class_grid[mask & np.isfinite(idx)] = labels
+
+    # ---- Map (index + classes overlays, footprint, AOI) -------------- #
+    st.markdown(f"### Map — {index_name}")
+    fmap = None
+    if HAVE_FOLIUM:
+        try:
+            fmap = proc.build_map(bundle, idx, mask, index_name, vlo, vhi,
+                                  class_grid=class_grid, n_classes=n_classes,
+                                  aoi_geojson=aoi_geojson)
+        except Exception as e:
+            st.caption(f"Map unavailable ({e}); showing static maps.")
+            fmap = None
+    if fmap is not None:
+        st_folium(fmap, height=560, returned_objects=[], use_container_width=True)
+        st.caption("Toggle the index, the vigour classes, and the basemap in the "
+                   "layer control (top right). Overlay placement is approximate — "
+                   "the georeferenced products are in the downloads.")
+    else:
+        # Fallback: static matplotlib maps (no CRS/bounds, or folium unavailable).
+        st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi, region=region))
+        st.pyplot(proc.fig_classified_map(class_grid, n_classes))
+        st.caption(f"{index_name} colour scale stretched to this dataset's range "
+                   f"({vlo:.2f}–{vhi:.2f}, 2–98th pct) — qualitative, within-map only.")
 
     # ---- Statistics -------------------------------------------------- #
     st.markdown("### Statistics")
@@ -292,32 +344,21 @@ def main():
     sc[2].metric(f"Mean {index_name}", f"{np.nanmean(vals):.3f}")
     sc[3].metric(f"Median {index_name}", f"{np.nanmedian(vals):.3f}")
 
-    # ---- Classification ---------------------------------------------- #
+    # ---- Classification table + histogram ---------------------------- #
     st.markdown("### Relative vigour classification")
-    try:
-        labels, edges = proc.classify(vals, method=method, n_classes=n_classes)
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
-
-    class_grid = np.full(idx.shape, -1, dtype="int16")
-    class_grid[mask & np.isfinite(idx)] = labels
-
     cc = st.columns([3, 2])
     with cc[0]:
-        st.pyplot(proc.fig_classified_map(class_grid, n_classes))
+        label_names = proc.class_label_set(n_classes)
+        rows = []
+        for k in range(n_classes):
+            cnt = int((labels == k).sum())
+            pct = 100.0 * cnt / labels.size
+            area = f"{cnt * px_area / 1e4:,.2f}" if px_area else "n/a"
+            rows.append({"Class": label_names[k], "Pixels": f"{cnt:,}",
+                         "% of area": f"{pct:.1f}%", "Area (ha)": area})
+        st.table(rows)
     with cc[1]:
         st.pyplot(proc.fig_histogram(vals, edges, index_name))
-
-    label_names = proc.class_label_set(n_classes)
-    rows = []
-    for k in range(n_classes):
-        cnt = int((labels == k).sum())
-        pct = 100.0 * cnt / labels.size
-        area = f"{cnt * px_area / 1e4:,.2f}" if px_area else "n/a"
-        rows.append({"Class": label_names[k], "Pixels": f"{cnt:,}",
-                     "% of area": f"{pct:.1f}%", "Area (ha)": area})
-    st.table(rows)
     st.caption("Classes are relative bands within *this* dataset — a pixel's rank "
                "in the index distribution, not a health diagnosis. 'Lowest' marks "
                "where to look first on the ground. Low values can also reflect "
@@ -364,9 +405,9 @@ def main():
             st.caption("Polygonised, sieved for QGIS.")
 
     st.divider()
-    st.caption("Map overlay and AOI subsetting are added next. Analysis runs on a "
-               f"~{meta.get('display_shape',[0,0])[0]}px working copy; downloads of "
-               "the index/classes are at that resolution, the ortho download is full.")
+    st.caption(f"Analysis runs on a ~{meta.get('display_shape',[0,0])[0]}px working "
+               "copy; the index/class downloads are at that resolution, the ortho "
+               "download is full resolution.")
 
 
 if __name__ == "__main__":

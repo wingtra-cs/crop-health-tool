@@ -7,3 +7,5 @@ rasterio
 geopandas
 scikit-learn
 scipy
+folium
+streamlit-folium
