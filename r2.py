@@ -174,6 +174,7 @@ def load_bundle(slug):
     raw_bounds = _get_bytes(prefix + "bounds_4326.json")
     bundle["bounds"] = json.loads(raw_bounds.decode("utf-8")) if raw_bounds else None
     bundle["overlay_png"] = _get_bytes(prefix + "overlay_webmerc.png")  # may be None
+    bundle["rgb_png"] = _get_bytes(prefix + "rgb.png")                  # native-grid preview
 
     return bundle
 
