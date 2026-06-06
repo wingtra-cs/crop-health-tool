@@ -107,9 +107,23 @@ def check_password():
 
 
 # --------------------------------------------------------------------------- #
-#  Per-ortho threshold state: re-seed Otsu when the dataset / mask index changes
+#  Threshold helpers
 # --------------------------------------------------------------------------- #
+def _reset_threshold(value):
+    """Reset the threshold slider. Runs as an on_click CALLBACK — i.e. before the
+    slider widget is recreated on the next run — so assigning to the widget's
+    session_state key is legal. (Assigning to a widget-backed key AFTER the widget
+    has been instantiated in the same run raises StreamlitAPIException.)"""
+    st.session_state["mask_thr"] = value
+
+
 def setup_threshold(bundle, mask_index_name):
+    """Compute mask-index values, Otsu (memoised per dataset+index), slider bounds;
+    seed the slider value once per signature. Returns (mvals, otsu, lo, hi).
+
+    The seeding assigns st.session_state['mask_thr'] only when it has NOT yet been
+    set for this signature, and always BEFORE the slider widget is created later in
+    main(), so it doesn't collide with the widget."""
     valid = bundle["valid"]
     mask_full = bundle["mask_ndvi"] if mask_index_name == "NDVI" \
         else proc.index_array(bundle, mask_index_name)
@@ -124,10 +138,11 @@ def setup_threshold(bundle, mask_index_name):
     otsu = st.session_state["otsu_val"]
 
     lo, hi = proc.slider_bounds(mvals)
+    seed = float(min(max(round(otsu, 3), lo), hi))
     tsig = (bundle["slug"], mask_index_name, lo, hi)
-    if st.session_state.get("thr_sig") != tsig:
+    if st.session_state.get("thr_sig") != tsig or "mask_thr" not in st.session_state:
         st.session_state["thr_sig"] = tsig
-        st.session_state["mask_thr"] = float(min(max(round(otsu, 3), lo), hi))
+        st.session_state["mask_thr"] = seed
     return mvals, otsu, lo, hi
 
 
@@ -229,10 +244,10 @@ def main():
                     min_value=lo, max_value=hi, step=0.005, key="mask_thr")
             with cbtn:
                 st.metric("Otsu auto", f"{otsu:.3f}")
-                if st.button("Reset to Otsu"):
-                    st.session_state["mask_thr"] = float(min(max(round(otsu, 3),
-                                                                 lo), hi))
-                    st.rerun()
+                # Reset via on_click callback so the assignment to the slider's
+                # session_state key happens BEFORE the slider is recreated.
+                st.button("Reset to Otsu", on_click=_reset_threshold,
+                          args=(float(min(max(round(otsu, 3), lo), hi)),))
 
             st.pyplot(proc.fig_mask_histogram(mvals, otsu, threshold,
                                               mask_index_name))
