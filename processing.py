@@ -15,12 +15,11 @@ Crop-neutral port of the validated offline logic:
   * red ground-mask check over the true-colour preview (cropped to the analysed
     region / AOI so the subset fills the frame)
   * AOI reading (KML / GeoJSON / zipped shapefile) + rasterisation
-  * a folium web map (satellite-only basemap, with the ortho true-colour image as
-    a persistent context layer beneath the data so there's always a registered
-    backdrop even past the satellite's zoom limit; index AND class overlays loaded
-    but mutually exclusive via a grouped radio control, so only one shows at a
-    time; footprint + AOI + an on-map legend; fits to the AOI when one is given
-    and allows deep zoom for close inspection of the overlay)
+  * a folium web map (satellite basemap with the ortho true-colour image as a
+    persistent context layer; the index AND class overlays are reprojected to Web
+    Mercator so they register correctly on the basemap, and are mutually exclusive
+    via a grouped radio control so only one shows at a time; footprint + AOI + an
+    on-map legend; fits to the AOI when one is given and allows deep zoom)
   * index GeoTIFF and class shapefile (zipped, with an AUTOMATIC speckle sieve
     scaled to the current map, and a named inner folder) writers for download
 
@@ -518,40 +517,74 @@ def aoi_to_4326_geojson(geom, raster_crs):
 
 # --------------------------------------------------------------------------- #
 #  Web map (folium): satellite basemap + persistent true-colour ortho context
-#  layer; index + classes loaded but mutually exclusive (radio) so only one shows
-#  at a time and switching needs no reload.
+#  layer; index + classes reprojected to Web Mercator for correct registration,
+#  loaded but mutually exclusive (radio) so only one shows at a time.
 # --------------------------------------------------------------------------- #
-def _geojson_bounds(gj):
-    """Leaflet-style [[south, west], [north, east]] bounding box of a (EPSG:4326)
-    geojson mapping, or None. Walks every coordinate pair in the features."""
-    lons, lats = [], []
+def _mercator_overlay_grid(meta, shape_hw):
+    """Compute one shared EPSG:3857 destination grid for the display arrays, so
+    every overlay reprojects onto the same grid and stays co-registered. Returns
+    (dst_transform, dst_w, dst_h, bounds_4326) or None if the dataset CRS is
+    missing or rasterio.warp is unavailable.
 
-    def _walk(c):
-        if (isinstance(c, (list, tuple)) and len(c) >= 2
-                and isinstance(c[0], (int, float)) and isinstance(c[1], (int, float))):
-            lons.append(float(c[0]))
-            lats.append(float(c[1]))
-            return
-        if isinstance(c, (list, tuple)):
-            for x in c:
-                _walk(x)
-
+    bounds_4326 = [[south, west], [north, east]] are the lat/lon corners of the
+    3857 extent. Because Leaflet's CRS is Web Mercator, a folium ImageOverlay of a
+    3857 image placed on those corners maps linearly with NO stretch — i.e. the
+    overlay registers correctly on the satellite basemap (the previous plain
+    lat/lon placement stretched the projected raster and was only approximate)."""
+    src_transform = affine_from_meta(meta)
+    src_crs = meta.get("crs")
+    if src_transform is None or not src_crs:
+        return None
     try:
-        feats = gj.get("features", []) if isinstance(gj, dict) else []
-        for f in feats:
-            geom = (f or {}).get("geometry") or {}
-            _walk(geom.get("coordinates", []))
+        from rasterio.warp import calculate_default_transform, transform_bounds
+        from rasterio.crs import CRS
     except Exception:
         return None
-    if not lons or not lats:
+    try:
+        src = CRS.from_user_input(src_crs)
+        dst = CRS.from_epsg(3857)
+        h, w = int(shape_hw[0]), int(shape_hw[1])
+        left = src_transform.c
+        top = src_transform.f
+        right = left + src_transform.a * w
+        bottom = top + src_transform.e * h
+        dst_transform, dw, dh = calculate_default_transform(
+            src, dst, w, h, left=left, bottom=bottom, right=right, top=top)
+        d_left = dst_transform.c
+        d_top = dst_transform.f
+        d_right = d_left + dst_transform.a * dw
+        d_bottom = d_top + dst_transform.e * dh
+        w4, s4, e4, n4 = transform_bounds(dst, CRS.from_epsg(4326),
+                                          d_left, d_bottom, d_right, d_top)
+        return dst_transform, int(dw), int(dh), [[s4, w4], [n4, e4]]
+    except Exception:
         return None
-    return [[min(lats), min(lons)], [max(lats), max(lons)]]
+
+
+def _warp_rgba_to_3857(rgba, meta, dst_transform, dw, dh):
+    """Reproject an (H,W,4) uint8 RGBA image from the dataset CRS to the shared
+    EPSG:3857 grid (nearest-neighbour, per band — keeps class edges crisp and the
+    alpha channel exact). Returns a PIL RGBA Image."""
+    from rasterio.warp import reproject, Resampling
+    from rasterio.crs import CRS
+    src = CRS.from_user_input(meta.get("crs"))
+    dst = CRS.from_epsg(3857)
+    src_transform = affine_from_meta(meta)
+    out = np.zeros((dh, dw, 4), dtype="uint8")
+    for b in range(4):
+        reproject(
+            source=np.ascontiguousarray(rgba[..., b]),
+            destination=out[..., b],
+            src_transform=src_transform, src_crs=src,
+            dst_transform=dst_transform, dst_crs=dst,
+            resampling=Resampling.nearest)
+    return Image.fromarray(out, mode="RGBA")
 
 
 def _rgb_overlay_image(bundle):
     """RGBA true-colour image of the ortho for use as a PERSISTENT context layer on
     the web map: real pixels opaque, off-footprint transparent so the satellite
-    basemap shows around it. Because it shares the overlays' exact bounds it stays
+    basemap shows around it. Because it shares the overlays' grid it stays
     registered with the index/class layers, and being a real image it gives useful
     context even past the satellite's native zoom (where the basemap blurs).
     Returns None if the dataset has no true-colour preview."""
@@ -600,20 +633,15 @@ def _legend_html(index_name, vlo, vhi, n_classes):
 def build_map(bundle, idx, mask, index_name, vlo, vhi,
               class_grid=None, n_classes=None, aoi_geojson=None):
     """Return a folium.Map, or None if folium is unavailable or the dataset has no
-    WGS84 bounds. Satellite basemap, with the ortho true-colour image added as a
-    persistent context layer beneath the data (transparent off-footprint), so there
-    is always a registered backdrop — even past the satellite's zoom limit. The
-    index and the vigour classes are BOTH added as overlays on top, but placed in
-    one exclusive group (radio buttons), so exactly one is visible at a time and
-    switching is instant (no app reload). Falls back to a plain layer control if
-    GroupedLayerControl isn't available.
-
-    The view fits to the AOI when one is given (otherwise the whole footprint), and
-    deep zoom is allowed (past the satellite's native tile level) so the overlay
-    can be inspected closely — the basemap upscales/blurs past native zoom, but the
-    true-colour context layer and the index/class layer stay registered and
-    inspectable. Overlay placement is approximate (exact georeferencing is in the
-    downloads)."""
+    WGS84 bounds. Satellite basemap, with the ortho true-colour image as a
+    persistent context layer beneath the data (transparent off-footprint). The
+    index and vigour-class overlays are REPROJECTED to Web Mercator so they
+    register correctly on the basemap, then placed in one exclusive radio group so
+    exactly one shows at a time (instant switch, no app reload). If reprojection
+    isn't possible (no CRS / rasterio.warp missing), it falls back to the previous
+    approximate lat/lon placement. Fits to the AOI when one is given; deep zoom is
+    allowed for close inspection (the basemap blurs past native zoom, but the
+    true-colour context and the overlays stay registered)."""
     bounds = bundle.get("bounds")
     if not bounds or "south" not in bounds:
         return None
@@ -622,13 +650,36 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     except Exception:
         return None
 
+    meta = bundle.get("meta") or {}
     south, west = float(bounds["south"]), float(bounds["west"])
     north, east = float(bounds["north"]), float(bounds["east"])
-    img_bounds = [[south, west], [north, east]]
+    foot_bounds = [[south, west], [north, east]]
     center = [(south + north) / 2.0, (west + east) / 2.0]
 
-    # max_zoom above the satellite's native level lets the user keep zooming in to
-    # inspect the overlay; the basemap upscales past max_native_zoom.
+    # Build the colourised layers on the source grid.
+    rgb_rgba = _rgb_overlay_image(bundle)
+    idx_rgba = colorize_index(idx, mask, vlo, vhi)
+    cls_rgba = (colorize_classes(class_grid, n_classes)
+                if (class_grid is not None and n_classes) else None)
+
+    # Reproject every layer onto one shared Web-Mercator grid so the linear
+    # ImageOverlay placement is exact. All-or-nothing: if the warp fails we keep
+    # the unwarped images on the footprint bounds (previous behaviour).
+    overlay_bounds = foot_bounds
+    grid = _mercator_overlay_grid(meta, idx.shape)
+    if grid is not None:
+        try:
+            dst_t, dw, dh, b4326 = grid
+            idx_w = _warp_rgba_to_3857(np.asarray(idx_rgba), meta, dst_t, dw, dh)
+            cls_w = (_warp_rgba_to_3857(np.asarray(cls_rgba), meta, dst_t, dw, dh)
+                     if cls_rgba is not None else None)
+            rgb_w = (_warp_rgba_to_3857(np.asarray(rgb_rgba), meta, dst_t, dw, dh)
+                     if rgb_rgba is not None else None)
+            idx_rgba, cls_rgba, rgb_rgba = idx_w, cls_w, rgb_w
+            overlay_bounds = b4326
+        except Exception:
+            overlay_bounds = foot_bounds  # unwarped images stay; original bounds
+
     m = folium.Map(location=center, zoom_start=15, tiles=None,
                    control_scale=True, max_zoom=22)
     folium.TileLayer(
@@ -642,29 +693,26 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     # the data overlays and sitting just beneath them (zindex 0). Always on, not in
     # the layer control, so it stays behind whichever overlay is selected and keeps
     # giving context when the satellite blurs at deep zoom.
-    rgb_ctx = _rgb_overlay_image(bundle)
-    if rgb_ctx is not None:
+    if rgb_rgba is not None:
         folium.raster_layers.ImageOverlay(
-            image=png_data_uri(rgb_ctx), bounds=img_bounds, opacity=1.0,
+            image=png_data_uri(rgb_rgba), bounds=overlay_bounds, opacity=1.0,
             name="True colour (ortho)", interactive=False, zindex=0,
             control=False, show=True).add_to(m)
 
-    idx_img = colorize_index(idx, mask, vlo, vhi)
     idx_layer = folium.raster_layers.ImageOverlay(
-        image=png_data_uri(idx_img), bounds=img_bounds, opacity=0.85,
+        image=png_data_uri(idx_rgba), bounds=overlay_bounds, opacity=0.85,
         name=f"{index_name} index", interactive=False, zindex=1, show=True)
     idx_layer.add_to(m)
 
     cls_layer = None
-    if class_grid is not None and n_classes:
-        cls_img = colorize_classes(class_grid, n_classes)
+    if cls_rgba is not None:
         cls_layer = folium.raster_layers.ImageOverlay(
-            image=png_data_uri(cls_img), bounds=img_bounds, opacity=0.85,
+            image=png_data_uri(cls_rgba), bounds=overlay_bounds, opacity=0.85,
             name="Vigour classes", interactive=False, zindex=2, show=False)
         cls_layer.add_to(m)
 
     if aoi_geojson is not None:
-        folium.Rectangle(bounds=img_bounds, color="#ffffff", weight=1.5,
+        folium.Rectangle(bounds=overlay_bounds, color="#ffffff", weight=1.5,
                          fill=False, opacity=0.7, dash_array="6,6").add_to(m)
         folium.GeoJson(
             aoi_geojson, name="AOI",
@@ -690,7 +738,7 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
 
     # Fit to the AOI when one is given, so the subset fills the view; otherwise fit
     # to the whole footprint.
-    fit_target = img_bounds
+    fit_target = overlay_bounds
     if aoi_geojson is not None:
         ab = _geojson_bounds(aoi_geojson)
         if ab is not None:
@@ -699,6 +747,33 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     m.get_root().html.add_child(
         folium.Element(_legend_html(index_name, vlo, vhi, n_classes)))
     return m
+
+
+def _geojson_bounds(gj):
+    """Leaflet-style [[south, west], [north, east]] bounding box of a (EPSG:4326)
+    geojson mapping, or None. Walks every coordinate pair in the features."""
+    lons, lats = [], []
+
+    def _walk(c):
+        if (isinstance(c, (list, tuple)) and len(c) >= 2
+                and isinstance(c[0], (int, float)) and isinstance(c[1], (int, float))):
+            lons.append(float(c[0]))
+            lats.append(float(c[1]))
+            return
+        if isinstance(c, (list, tuple)):
+            for x in c:
+                _walk(x)
+
+    try:
+        feats = gj.get("features", []) if isinstance(gj, dict) else []
+        for f in feats:
+            geom = (f or {}).get("geometry") or {}
+            _walk(geom.get("coordinates", []))
+    except Exception:
+        return None
+    if not lons or not lats:
+        return None
+    return [[min(lats), min(lons)], [max(lats), max(lons)]]
 
 
 # --------------------------------------------------------------------------- #

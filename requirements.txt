@@ -1,11 +1,23 @@
-streamlit
-boto3
-numpy
-pillow
-matplotlib
-rasterio
-geopandas
-scikit-learn
-scipy
-folium>=0.16
-streamlit-folium
+# Crop Health Visualization and Classification Tool — dependencies.
+#
+# Floors guarantee the features the app relies on; major-version caps guard
+# against a breaking release landing mid-demo. pip still installs the newest
+# version in each range that has a wheel for the deployment's Python, so this
+# matches the currently-working set while removing the "silent major bump" risk.
+#
+# BEFORE THE DEMO — freeze exact versions for full reproducibility:
+#   open Streamlit Cloud -> Manage app -> build logs; the "Installing ..." lines
+#   list the exact resolved versions. Replace each ">=x,<y" below with "==<that
+#   version>" so the demo build can never shift under you.
+
+streamlit>=1.30,<2          # st.container(border=...), link_button, metric cards
+streamlit-folium>=0.20,<1   # st_folium(use_container_width=...)
+folium>=0.16,<1             # folium.plugins.GroupedLayerControl (radio overlays)
+boto3>=1.34,<2              # R2 (S3-compatible) presigned URLs
+numpy>=1.26,<3
+pillow>=10,<12
+matplotlib>=3.8,<4
+rasterio>=1.3,<2            # index GeoTIFF + Web-Mercator overlay reprojection
+geopandas>=0.14,<2          # AOI read + class shapefile export
+scikit-learn>=1.3,<2        # k-means classification (optional method)
+scipy>=1.11,<2              # KDE density curves + automatic speckle sieve
