@@ -20,8 +20,9 @@ Crop-neutral port of the validated offline logic:
   * index GeoTIFF and class shapefile (zipped) writers for download
 
 Charts use a clean "airy" style (white ground, faint gridlines, no top/right
-frame, soft bars with an overlaid density curve, no titles). Nothing here reads
-the multi-GB ortho; it all runs on the small precomputed arrays.
+frame, soft bars with an overlaid density curve, no titles, thin reference
+lines). Nothing here reads the multi-GB ortho; it all runs on the small
+precomputed arrays.
 """
 
 import io
@@ -314,16 +315,16 @@ def fig_classified_map(class_grid, n_classes):
 
 
 def fig_histogram(values, edges, name):
-    """Index distribution — airy bars + density curve, no title."""
+    """Index distribution — airy bars + density curve, no title, thin lines."""
     fig, ax = plt.subplots(figsize=(8, 3.0))
     _apply_airy(ax)
     ax.hist(values, bins=60, color=_C_BAR, edgecolor="white", linewidth=0.4,
             alpha=0.55, density=True, zorder=3)
     dxy = _density_xy(values)
     if dxy is not None:
-        ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=2.0, zorder=4)
+        ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=1.5, zorder=4)
     for e in edges:
-        ax.axvline(e, color=_C_BREAK, linestyle=(0, (4, 3)), linewidth=1.1, zorder=5)
+        ax.axvline(e, color=_C_BREAK, linestyle=(0, (4, 3)), linewidth=0.8, zorder=5)
     ax.set_yticks([])
     ax.set_xlabel(name, color=_C_LABEL, fontsize=9)
     fig.tight_layout()
@@ -331,20 +332,20 @@ def fig_histogram(values, edges, name):
 
 
 def fig_mask_histogram(mvals, otsu, threshold, name):
-    """Ground-threshold distribution — airy bars + density curve, no title.
-    Bars preserve the bimodal soil/canopy gap; the curve adds a clean line."""
+    """Ground-threshold distribution — airy bars + density curve, no title, thin
+    lines. Bars preserve the bimodal soil/canopy gap; the curve adds a clean line."""
     fig, ax = plt.subplots(figsize=(8, 3.0))
     _apply_airy(ax)
     ax.hist(mvals, bins=80, color=_C_BAR2, edgecolor="white", linewidth=0.3,
             alpha=0.5, density=True, zorder=3)
     dxy = _density_xy(mvals)
     if dxy is not None:
-        ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=2.0, zorder=4)
+        ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=1.5, zorder=4)
     x0 = ax.get_xlim()[0]
     ax.axvspan(x0, threshold, color=_C_THR, alpha=0.05, zorder=1)
-    ax.axvline(otsu, color=_C_OTSU, linestyle=":", linewidth=1.6, zorder=5,
+    ax.axvline(otsu, color=_C_OTSU, linestyle=":", linewidth=1.0, zorder=5,
                label=f"Otsu auto ({otsu:.3f})")
-    ax.axvline(threshold, color=_C_THR, linewidth=2.2, zorder=6,
+    ax.axvline(threshold, color=_C_THR, linewidth=1.3, zorder=6,
                label=f"Active threshold ({threshold:.3f})")
     ax.set_yticks([])
     ax.set_xlabel(name, color=_C_LABEL, fontsize=9)
