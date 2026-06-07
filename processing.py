@@ -14,13 +14,14 @@ Crop-neutral port of the validated offline logic:
   * colourised index / class images for display and for the web map overlay
   * red ground-mask check over the true-colour preview
   * AOI reading (KML / GeoJSON / zipped shapefile) + rasterisation
-  * a folium web map (satellite-only basemap; the index OR the vigour classes as
-    a single overlay — never both at once — with footprint + AOI + an on-map legend)
+  * a folium web map (satellite-only basemap; index AND class overlays loaded but
+    mutually exclusive via a grouped radio control, so only one shows at a time;
+    footprint + AOI + an on-map legend)
   * index GeoTIFF and class shapefile (zipped) writers for download
 
 Charts use a clean "airy" style (white ground, faint gridlines, no top/right
-frame, soft fills). Nothing here reads the multi-GB ortho; it all runs on the
-small precomputed arrays.
+frame, soft bars with an overlaid density curve, no titles). Nothing here reads
+the multi-GB ortho; it all runs on the small precomputed arrays.
 """
 
 import io
@@ -96,6 +97,7 @@ _C_LABEL = "#5b6b72"
 _C_TITLE = "#1C2E36"
 _C_BAR = "#9ec6e0"        # soft blue for the index histogram
 _C_BAR2 = "#cdd8db"       # soft slate for the mask histogram
+_C_CURVE = "#4a6b78"      # density-curve line (desaturated navy)
 _C_OTSU = "#5b8fb0"       # muted blue dotted Otsu line
 _C_THR = "#F46F29"        # Sun Orange for the active threshold (action accent)
 _C_BREAK = "#cf5b4a"      # muted red dashed class breaks
@@ -249,7 +251,7 @@ def png_data_uri(img):
 
 
 # --------------------------------------------------------------------------- #
-#  Charts — clean "airy" style
+#  Charts — clean "airy" style: soft bars + overlaid density curve, no titles
 # --------------------------------------------------------------------------- #
 def _apply_airy(ax):
     """Shared airy treatment: white ground, faint y-gridlines behind data, no
@@ -261,6 +263,22 @@ def _apply_airy(ax):
     for s in ("left", "bottom"):
         ax.spines[s].set_color(_C_SPINE)
     ax.tick_params(colors=_C_LABEL, labelsize=9, length=0)
+
+
+def _density_xy(values, n=400):
+    """KDE curve (xs, ys) over the data range, or None if scipy is unavailable or
+    the data are degenerate. ys are scaled to a density (integrates to ~1)."""
+    v = np.asarray(values, dtype="float64")
+    v = v[np.isfinite(v)]
+    if v.size < 5 or np.ptp(v) < 1e-9:
+        return None
+    try:
+        from scipy.stats import gaussian_kde
+        k = gaussian_kde(v)
+        xs = np.linspace(v.min(), v.max(), n)
+        return xs, k(xs)
+    except Exception:
+        return None
 
 
 def fig_index_map(idx2d, mask, name, vmin, vmax, region="analysed area"):
@@ -296,34 +314,39 @@ def fig_classified_map(class_grid, n_classes):
 
 
 def fig_histogram(values, edges, name):
-    """Index distribution — airy style."""
-    fig, ax = plt.subplots(figsize=(8, 3.2))
+    """Index distribution — airy bars + density curve, no title."""
+    fig, ax = plt.subplots(figsize=(8, 3.0))
     _apply_airy(ax)
-    ax.hist(values, bins=60, color=_C_BAR, edgecolor="white",
-            linewidth=0.4, alpha=0.95, zorder=3)
+    ax.hist(values, bins=60, color=_C_BAR, edgecolor="white", linewidth=0.4,
+            alpha=0.55, density=True, zorder=3)
+    dxy = _density_xy(values)
+    if dxy is not None:
+        ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=2.0, zorder=4)
     for e in edges:
-        ax.axvline(e, color=_C_BREAK, linestyle=(0, (4, 3)), linewidth=1.1, zorder=4)
-    ax.set_title(f"Distribution of {name}  ·  dashed = class breaks",
-                 fontsize=11, fontweight="bold", loc="left", pad=10, color=_C_TITLE)
+        ax.axvline(e, color=_C_BREAK, linestyle=(0, (4, 3)), linewidth=1.1, zorder=5)
+    ax.set_yticks([])
     ax.set_xlabel(name, color=_C_LABEL, fontsize=9)
     fig.tight_layout()
     return fig
 
 
 def fig_mask_histogram(mvals, otsu, threshold, name):
-    """Ground-threshold histogram — airy style, with a faint masked-region wash."""
+    """Ground-threshold distribution — airy bars + density curve, no title.
+    Bars preserve the bimodal soil/canopy gap; the curve adds a clean line."""
     fig, ax = plt.subplots(figsize=(8, 3.0))
     _apply_airy(ax)
-    ax.hist(mvals, bins=80, color=_C_BAR2, edgecolor="white",
-            linewidth=0.3, alpha=0.9, zorder=3)
+    ax.hist(mvals, bins=80, color=_C_BAR2, edgecolor="white", linewidth=0.3,
+            alpha=0.5, density=True, zorder=3)
+    dxy = _density_xy(mvals)
+    if dxy is not None:
+        ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=2.0, zorder=4)
     x0 = ax.get_xlim()[0]
     ax.axvspan(x0, threshold, color=_C_THR, alpha=0.05, zorder=1)
-    ax.axvline(otsu, color=_C_OTSU, linestyle=":", linewidth=1.6, zorder=4,
+    ax.axvline(otsu, color=_C_OTSU, linestyle=":", linewidth=1.6, zorder=5,
                label=f"Otsu auto ({otsu:.3f})")
-    ax.axvline(threshold, color=_C_THR, linewidth=2.2, zorder=5,
+    ax.axvline(threshold, color=_C_THR, linewidth=2.2, zorder=6,
                label=f"Active threshold ({threshold:.3f})")
-    ax.set_title(f"{name} over all pixels — left of the line is masked as ground",
-                 fontsize=11, fontweight="bold", loc="left", pad=10, color=_C_TITLE)
+    ax.set_yticks([])
     ax.set_xlabel(name, color=_C_LABEL, fontsize=9)
     ax.legend(fontsize=8, frameon=False)
     fig.tight_layout()
@@ -453,44 +476,46 @@ def aoi_to_4326_geojson(geom, raster_crs):
 
 
 # --------------------------------------------------------------------------- #
-#  Web map (folium): satellite-only basemap; index OR classes (never both)
+#  Web map (folium): satellite-only basemap; index + classes loaded but mutually
+#  exclusive (radio) so only one shows at a time and switching needs no reload.
 # --------------------------------------------------------------------------- #
-def _legend_html(index_name, vlo, vhi, n_classes, layer):
-    """A small fixed legend panel showing only the active layer's legend
-    (index gradient OR class swatches)."""
-    if layer == "classes" and n_classes:
-        swatches = ""
+def _legend_html(index_name, vlo, vhi, n_classes):
+    """Fixed legend panel showing BOTH the index gradient and the class swatches
+    (both overlays exist on the map; the user toggles between them client-side)."""
+    swatches = ""
+    if n_classes:
         for c, lab in zip(class_palette(n_classes), class_label_set(n_classes)):
             hexc = c if isinstance(c, str) else to_hex(c)
             swatches += (
                 f'<div style="display:flex;align-items:center;margin:2px 0;">'
                 f'<span style="background:{hexc};width:13px;height:13px;display:inline-block;'
                 f'margin-right:6px;border:1px solid #888;"></span>{lab}</div>')
-        body = (f'<div style="font-weight:700;margin-bottom:4px;">Vigour classes</div>'
-                f'{swatches}')
-    else:
-        ramp = ", ".join(_RAMP_STOPS)
-        body = (
-            f'<div style="font-weight:700;margin-bottom:3px;">{index_name} index</div>'
-            f'<div style="background: linear-gradient(to right, {ramp});'
-            f'width:150px; height:12px; border:1px solid #888;"></div>'
-            f'<div style="display:flex; justify-content:space-between; width:150px;'
-            f'font-size:11px; margin-top:1px;">'
-            f'<span>{vlo:.2f}</span><span>low → high</span><span>{vhi:.2f}</span></div>')
+    ramp = ", ".join(_RAMP_STOPS)
     return f"""
     <div style="position: fixed; bottom: 22px; right: 12px; z-index: 9999;
         background: rgba(255,255,255,0.93); padding: 9px 11px;
         border: 1px solid #bbb; border-radius: 6px; font-size: 12px;
         color: #1C2E36; font-family: sans-serif;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.25);">{body}</div>"""
+        box-shadow: 0 1px 4px rgba(0,0,0,0.25);">
+      <div style="font-weight:700; margin-bottom:3px;">{index_name} index</div>
+      <div style="background: linear-gradient(to right, {ramp});
+          width:150px; height:12px; border:1px solid #888;"></div>
+      <div style="display:flex; justify-content:space-between; width:150px;
+          font-size:11px; margin-top:1px;">
+        <span>{vlo:.2f}</span><span>low → high</span><span>{vhi:.2f}</span>
+      </div>
+      <div style="font-weight:700; margin:8px 0 3px;">Vigour classes</div>
+      {swatches}
+    </div>"""
 
 
 def build_map(bundle, idx, mask, index_name, vlo, vhi,
-              class_grid=None, n_classes=None, aoi_geojson=None, layer="index"):
+              class_grid=None, n_classes=None, aoi_geojson=None):
     """Return a folium.Map, or None if folium is unavailable or the dataset has no
-    WGS84 bounds. Satellite-only basemap. Exactly ONE overlay is drawn — the index
-    or the vigour classes — chosen by `layer` ("index" | "classes"), so both are
-    never shown at once. Footprint outline + AOI are drawn only when an AOI is given.
+    WGS84 bounds. Satellite-only basemap. The index and the vigour classes are
+    BOTH added as overlays but placed in one exclusive group (radio buttons), so
+    exactly one is visible at a time and switching is instant (no app reload).
+    Falls back to a plain layer control if GroupedLayerControl isn't available.
     Overlay placement is approximate (exact georeferencing is in the downloads)."""
     bounds = bundle.get("bounds")
     if not bounds or "south" not in bounds:
@@ -512,22 +537,19 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
         attr="Esri World Imagery", name="Satellite", overlay=False, control=True,
     ).add_to(m)
 
-    # Exactly one overlay, per `layer`.
-    show_classes = (layer == "classes" and class_grid is not None and n_classes)
-    if show_classes:
+    idx_img = colorize_index(idx, mask, vlo, vhi)
+    idx_layer = folium.raster_layers.ImageOverlay(
+        image=png_data_uri(idx_img), bounds=img_bounds, opacity=0.85,
+        name=f"{index_name} index", interactive=False, zindex=1, show=True)
+    idx_layer.add_to(m)
+
+    cls_layer = None
+    if class_grid is not None and n_classes:
         cls_img = colorize_classes(class_grid, n_classes)
-        folium.raster_layers.ImageOverlay(
+        cls_layer = folium.raster_layers.ImageOverlay(
             image=png_data_uri(cls_img), bounds=img_bounds, opacity=0.85,
-            name="Vigour classes", interactive=False, zindex=1,
-        ).add_to(m)
-        legend_layer = "classes"
-    else:
-        idx_img = colorize_index(idx, mask, vlo, vhi)
-        folium.raster_layers.ImageOverlay(
-            image=png_data_uri(idx_img), bounds=img_bounds, opacity=0.85,
-            name=f"{index_name} index", interactive=False, zindex=1,
-        ).add_to(m)
-        legend_layer = "index"
+            name="Vigour classes", interactive=False, zindex=2, show=False)
+        cls_layer.add_to(m)
 
     if aoi_geojson is not None:
         folium.Rectangle(bounds=img_bounds, color="#ffffff", weight=1.5,
@@ -538,10 +560,25 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
                                        "fill": False},
         ).add_to(m)
 
-    folium.LayerControl(collapsed=False).add_to(m)
+    # Mutually exclusive overlays via a grouped radio control. If the installed
+    # folium lacks GroupedLayerControl, fall back to a normal layer control.
+    grouped = False
+    if cls_layer is not None:
+        try:
+            from folium.plugins import GroupedLayerControl
+            GroupedLayerControl(
+                groups={"Layer": [idx_layer, cls_layer]},
+                exclusive_groups=True, collapsed=False,
+            ).add_to(m)
+            grouped = True
+        except Exception:
+            grouped = False
+    if not grouped:
+        folium.LayerControl(collapsed=False).add_to(m)
+
     m.fit_bounds(img_bounds)
     m.get_root().html.add_child(
-        folium.Element(_legend_html(index_name, vlo, vhi, n_classes, legend_layer)))
+        folium.Element(_legend_html(index_name, vlo, vhi, n_classes)))
     return m
 
 

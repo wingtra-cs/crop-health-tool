@@ -7,8 +7,9 @@ Branding + password gate, an ortho dropdown driven live by the R2 bucket (no
 dataset loads until the user actively picks one), then the interactive analysis:
   * bare-earth threshold (Otsu + slider) with a red ground-mask check
   * optional AOI subsetting (upload KML / GeoJSON / zipped shapefile)
-  * a satellite web map showing EITHER the vegetation index OR the vigour classes
-    (chosen by a radio — never both), with an on-map legend + AOI outline
+  * a satellite web map with the index and the vigour classes as MUTUALLY
+    EXCLUSIVE overlays (radio in the map's layer control — only one shows, and
+    switching is instant with no app reload), plus an on-map legend + AOI outline
   * relative-vigour classification (quartile / k-means, 3–5 classes) + table
   * three downloads: full ortho (presigned URL), index GeoTIFF, class shapefile
 
@@ -337,34 +338,29 @@ def main():
     class_grid = np.full(idx.shape, -1, dtype="int16")
     class_grid[mask & np.isfinite(idx)] = labels
 
-    # ---- Map card (index OR classes, never both) --------------------- #
+    # ---- Map card (index + classes as mutually exclusive overlays) --- #
     st.markdown("### Map")
-    map_choice = st.radio("Show on map", [f"{index_name} index", "Vigour classes"],
-                          horizontal=True, label_visibility="collapsed")
-    layer = "classes" if map_choice == "Vigour classes" else "index"
-
     with st.container(border=True):
         fmap = None
         if HAVE_FOLIUM:
             try:
                 fmap = proc.build_map(bundle, idx, mask, index_name, vlo, vhi,
                                       class_grid=class_grid, n_classes=n_classes,
-                                      aoi_geojson=aoi_geojson, layer=layer)
+                                      aoi_geojson=aoi_geojson)
             except Exception as e:
                 st.caption(f"Map unavailable ({e}); showing static maps.")
                 fmap = None
         if fmap is not None:
             st_folium(fmap, height=560, returned_objects=[],
                       use_container_width=True)
-            st.caption("Satellite basemap. Use the radio above to switch between the "
-                       "index and the vigour classes. Overlay placement is "
-                       "approximate — the georeferenced products are in the downloads.")
+            st.caption("Satellite basemap. Switch between the index and the vigour "
+                       "classes in the layer control (top right) — only one shows at "
+                       "a time. Overlay placement is approximate; the georeferenced "
+                       "products are in the downloads.")
         else:
-            if layer == "classes":
-                st.pyplot(proc.fig_classified_map(class_grid, n_classes))
-            else:
-                st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi,
-                                             region=region))
+            st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi,
+                                         region=region))
+            st.pyplot(proc.fig_classified_map(class_grid, n_classes))
             st.caption("Static fallback (map renderer unavailable).")
 
     # ---- Statistics (stat cards) ------------------------------------- #
