@@ -17,7 +17,8 @@ Crop-neutral port of the validated offline logic:
   * a folium web map (satellite-only basemap; index AND class overlays loaded but
     mutually exclusive via a grouped radio control, so only one shows at a time;
     footprint + AOI + an on-map legend)
-  * index GeoTIFF and class shapefile (zipped) writers for download
+  * index GeoTIFF and class shapefile (zipped, with a minimum-area sieve and a
+    named inner folder) writers for download
 
 Charts use a clean "airy" style (white ground, faint gridlines, no top/right
 frame, soft bars with an overlaid density curve, no titles, thin reference
@@ -616,8 +617,26 @@ def index_geotiff_bytes(idx2d, mask, meta):
         return mem.read()
 
 
-def classes_shapefile_zip(class_grid, n_classes, meta, sieve_min_pixels=8):
-    """Polygonise the class raster and return a ZIPPED shapefile (bytes)."""
+def min_area_to_pixels(min_area_ha, meta):
+    """Convert a minimum area in hectares to a pixel count on the display grid,
+    using the dataset's pixel size. Returns 0 if area can't be determined
+    (geographic CRS) or min_area_ha <= 0."""
+    if not min_area_ha or min_area_ha <= 0:
+        return 0
+    px = pixel_area_m2(meta)
+    if not px:
+        return 0
+    return int(round(min_area_ha * 1e4 / px))
+
+
+def classes_shapefile_zip(class_grid, n_classes, meta, min_area_ha=0.0,
+                          folder_name="vigour_classes"):
+    """Polygonise the class raster and return a ZIPPED shapefile (bytes).
+
+    Speckle below `min_area_ha` (converted to pixels via the dataset's pixel size)
+    is sieved out before polygonising. The shapefile components are written inside
+    a named folder in the archive so it unzips cleanly to one directory.
+    Polygons carry the integer class (0..n-1) and its relative-vigour label."""
     try:
         import geopandas as gpd
         from shapely.geometry import shape
@@ -630,6 +649,7 @@ def classes_shapefile_zip(class_grid, n_classes, meta, sieve_min_pixels=8):
     grid = class_grid.astype("int32")
     valid = grid >= 0
 
+    sieve_min_pixels = min_area_to_pixels(min_area_ha, meta)
     if sieve_min_pixels and sieve_min_pixels > 1:
         try:
             from scipy import ndimage as ndi
@@ -654,14 +674,16 @@ def classes_shapefile_zip(class_grid, n_classes, meta, sieve_min_pixels=8):
         geoms.append(shape(geom))
         recs.append({"class": k, "label": labels[k]})
     if not geoms:
-        raise RuntimeError("No class polygons to export.")
+        raise RuntimeError("No class polygons left to export — try a smaller "
+                           "minimum area.")
 
     gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs=crs)
     tmp = tempfile.mkdtemp()
-    shp_path = os.path.join(tmp, "vigour_classes.shp")
+    shp_path = os.path.join(tmp, f"{folder_name}.shp")
     gdf.to_file(shp_path)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for fn in os.listdir(tmp):
-            z.write(os.path.join(tmp, fn), arcname=fn)
+            # Nest every component inside a named folder for a clean unzip.
+            z.write(os.path.join(tmp, fn), arcname=os.path.join(folder_name, fn))
     return buf.getvalue()

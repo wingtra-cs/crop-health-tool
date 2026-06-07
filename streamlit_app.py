@@ -12,6 +12,8 @@ dataset loads until the user actively picks one), then the interactive analysis:
     switching is instant with no app reload), plus an on-map legend + AOI outline
   * relative-vigour classification (quartile / k-means, 3–5 classes) + table
   * three downloads: full ortho (presigned URL), index GeoTIFF, class shapefile
+    (with a minimum-area sieve; the prepared file is invalidated whenever any
+    defining setting changes, so a download is always for the current settings)
 
 Visual style: clean / minimal — Manrope type, a Mercury-blue header band with a
 Sun-Orange rule, white rounded "cards" around the graphics, airy charts.
@@ -417,22 +419,52 @@ def main():
             except Exception as e:
                 st.caption(f"Index export unavailable: {e}")
         with d3:
+            # Minimum class area (hectares) — speckle below this is dropped.
+            thr_key = round(threshold, 4) if threshold is not None else None
+            min_area_ha = st.number_input(
+                "Min. class area (ha)", min_value=0.0, value=0.0, step=0.01,
+                format="%.2f",
+                help="Polygons smaller than this are dropped as speckle. "
+                     "0 keeps everything.",
+                disabled=px_area is None)
+            if px_area is None:
+                st.caption("Area sieve unavailable (geographic CRS).")
+
+            # Signature of everything that defines the prepared shapefile. If any
+            # of it changes, the previously prepared file is stale -> discard it so
+            # a download is never served for the wrong settings.
+            shp_sig = (slug, index_name, n_classes, method, thr_key,
+                       bool(ground_mask_on), mask_index_name,
+                       int(aoi_mask.sum()) if aoi_mask is not None else 0,
+                       round(float(min_area_ha), 4))
+            if st.session_state.get("shp_sig") != shp_sig:
+                st.session_state.pop("shp_bytes", None)
+                st.session_state.pop("shp_name", None)
+                st.session_state["shp_sig"] = shp_sig
+
             if st.button("Prepare class shapefile", use_container_width=True):
                 try:
                     with st.spinner("Polygonising classes…"):
-                        zbytes = proc.classes_shapefile_zip(class_grid, n_classes, meta)
+                        zbytes = proc.classes_shapefile_zip(
+                            class_grid, n_classes, meta,
+                            min_area_ha=float(min_area_ha),
+                            folder_name=f"{slug}_{index_name}_classes")
                     st.session_state["shp_bytes"] = zbytes
                     st.session_state["shp_name"] = f"{slug}_{index_name}_classes.zip"
+                    st.session_state["shp_sig"] = shp_sig
                 except Exception as e:
                     st.session_state.pop("shp_bytes", None)
                     st.error(f"Shapefile export failed: {e}")
+
             if st.session_state.get("shp_bytes"):
                 st.download_button("⬇ Class shapefile (zip)",
                                    data=st.session_state["shp_bytes"],
                                    file_name=st.session_state.get("shp_name",
                                                                   "classes.zip"),
                                    mime="application/zip", use_container_width=True)
-                st.caption("Polygonised, sieved for QGIS.")
+                st.caption("Polygonised, sieved, for QGIS.")
+            else:
+                st.caption("Prepare to generate a download for the current settings.")
 
     st.divider()
     st.caption(f"Analysis runs on a ~{meta.get('display_shape',[0,0])[0]}px working "
