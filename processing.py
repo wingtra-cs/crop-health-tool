@@ -12,11 +12,13 @@ Crop-neutral port of the validated offline logic:
   * adaptive (per-block, percentile) colour limits so within-map variation shows
   * quartile / k-means relative-vigour classification (labels low -> high)
   * colourised index / class images for display and for the web map overlay
-  * red ground-mask check over the true-colour preview
+  * red ground-mask check over the true-colour preview (cropped to the analysed
+    region / AOI so the subset fills the frame)
   * AOI reading (KML / GeoJSON / zipped shapefile) + rasterisation
   * a folium web map (satellite-only basemap; index AND class overlays loaded but
     mutually exclusive via a grouped radio control, so only one shows at a time;
-    footprint + AOI + an on-map legend)
+    footprint + AOI + an on-map legend; fits to the AOI when one is given and
+    allows deep zoom for close inspection of the overlay)
   * index GeoTIFF and class shapefile (zipped, with an AUTOMATIC speckle sieve
     scaled to the current map, and a named inner folder) writers for download
 
@@ -380,8 +382,30 @@ def _decode_rgb_png(rgb_png_bytes, shape_hw):
     return arr
 
 
+def _crop_box(valid, margin_frac=0.06):
+    """Row/col slice (r0, r1, c0, c1) bounding the True region of `valid`, padded
+    by a margin so the subset doesn't touch the frame edge. Returns None if nothing
+    is valid. Used to zoom the mask-check render onto the analysed region / AOI
+    instead of showing the whole grid with the subset as a tiny patch."""
+    rows = np.any(valid, axis=1)
+    cols = np.any(valid, axis=0)
+    if not rows.any() or not cols.any():
+        return None
+    r_idx = np.where(rows)[0]
+    c_idx = np.where(cols)[0]
+    r0, r1 = int(r_idx[0]), int(r_idx[-1]) + 1
+    c0, c1 = int(c_idx[0]), int(c_idx[-1]) + 1
+    h, w = valid.shape
+    mr = int(round((r1 - r0) * margin_frac)) + 1
+    mc = int(round((c1 - c0) * margin_frac)) + 1
+    return (max(0, r0 - mr), min(h, r1 + mr), max(0, c0 - mc), min(w, c1 + mc))
+
+
 def fig_mask_check(bundle, valid, veg):
-    """True-colour reference with pixels masked as ground tinted red."""
+    """True-colour reference with pixels masked as ground tinted red. The render is
+    cropped to the bounding box of `valid` (the analysed region, i.e. the AOI when
+    one is set), so the subset fills the frame instead of sitting as a tiny patch
+    in a large grey border."""
     shape_hw = valid.shape
     rgb = _decode_rgb_png(bundle.get("rgb_png"), shape_hw)
     if rgb is None:
@@ -400,6 +424,13 @@ def fig_mask_check(bundle, valid, veg):
     ground = valid & (~veg)
     red = np.array([0.86, 0.12, 0.12], dtype="float32")
     over[ground] = 0.45 * over[ground] + 0.55 * red
+
+    # Zoom onto the analysed region / AOI.
+    box = _crop_box(valid)
+    if box is not None:
+        r0, r1, c0, c1 = box
+        base = base[r0:r1, c0:c1]
+        over = over[r0:r1, c0:c1]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.4))
     axes[0].imshow(base)
@@ -487,6 +518,33 @@ def aoi_to_4326_geojson(geom, raster_crs):
 #  Web map (folium): satellite-only basemap; index + classes loaded but mutually
 #  exclusive (radio) so only one shows at a time and switching needs no reload.
 # --------------------------------------------------------------------------- #
+def _geojson_bounds(gj):
+    """Leaflet-style [[south, west], [north, east]] bounding box of a (EPSG:4326)
+    geojson mapping, or None. Walks every coordinate pair in the features."""
+    lons, lats = [], []
+
+    def _walk(c):
+        if (isinstance(c, (list, tuple)) and len(c) >= 2
+                and isinstance(c[0], (int, float)) and isinstance(c[1], (int, float))):
+            lons.append(float(c[0]))
+            lats.append(float(c[1]))
+            return
+        if isinstance(c, (list, tuple)):
+            for x in c:
+                _walk(x)
+
+    try:
+        feats = gj.get("features", []) if isinstance(gj, dict) else []
+        for f in feats:
+            geom = (f or {}).get("geometry") or {}
+            _walk(geom.get("coordinates", []))
+    except Exception:
+        return None
+    if not lons or not lats:
+        return None
+    return [[min(lats), min(lons)], [max(lats), max(lons)]]
+
+
 def _legend_html(index_name, vlo, vhi, n_classes):
     """Fixed legend panel showing BOTH the index gradient and the class swatches
     (both overlays exist on the map; the user toggles between them client-side)."""
@@ -524,7 +582,12 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     BOTH added as overlays but placed in one exclusive group (radio buttons), so
     exactly one is visible at a time and switching is instant (no app reload).
     Falls back to a plain layer control if GroupedLayerControl isn't available.
-    Overlay placement is approximate (exact georeferencing is in the downloads)."""
+
+    The view fits to the AOI when one is given (otherwise the whole footprint), and
+    deep zoom is allowed (past the satellite's native tile level) so the overlay
+    can be inspected closely — the basemap upscales/blurs past native zoom, but the
+    index/class layer stays inspectable. Overlay placement is approximate (exact
+    georeferencing is in the downloads)."""
     bounds = bundle.get("bounds")
     if not bounds or "south" not in bounds:
         return None
@@ -538,11 +601,15 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     img_bounds = [[south, west], [north, east]]
     center = [(south + north) / 2.0, (west + east) / 2.0]
 
-    m = folium.Map(location=center, zoom_start=15, tiles=None, control_scale=True)
+    # max_zoom above the satellite's native level lets the user keep zooming in to
+    # inspect the overlay; the basemap upscales past max_native_zoom.
+    m = folium.Map(location=center, zoom_start=15, tiles=None,
+                   control_scale=True, max_zoom=22)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
               "World_Imagery/MapServer/tile/{z}/{y}/{x}",
         attr="Esri World Imagery", name="Satellite", overlay=False, control=True,
+        max_zoom=22, max_native_zoom=19,
     ).add_to(m)
 
     idx_img = colorize_index(idx, mask, vlo, vhi)
@@ -584,7 +651,14 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
     if not grouped:
         folium.LayerControl(collapsed=False).add_to(m)
 
-    m.fit_bounds(img_bounds)
+    # Fit to the AOI when one is given, so the subset fills the view; otherwise fit
+    # to the whole footprint.
+    fit_target = img_bounds
+    if aoi_geojson is not None:
+        ab = _geojson_bounds(aoi_geojson)
+        if ab is not None:
+            fit_target = ab
+    m.fit_bounds(fit_target)
     m.get_root().html.add_child(
         folium.Element(_legend_html(index_name, vlo, vhi, n_classes)))
     return m
