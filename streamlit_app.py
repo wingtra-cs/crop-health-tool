@@ -7,13 +7,13 @@ Branding + password gate, an ortho dropdown driven live by the R2 bucket (no
 dataset loads until the user actively picks one), then the interactive analysis:
   * bare-earth threshold (Otsu + slider) with a red ground-mask check
   * optional AOI subsetting (upload KML / GeoJSON / zipped shapefile)
-  * a web map (satellite basemap) with the vegetation index and the vigour
-    classes as toggleable overlays, an on-map legend, footprint + AOI outline
+  * a satellite web map showing EITHER the vegetation index OR the vigour classes
+    (chosen by a radio — never both), with an on-map legend + AOI outline
   * relative-vigour classification (quartile / k-means, 3–5 classes) + table
   * three downloads: full ortho (presigned URL), index GeoTIFF, class shapefile
 
 Visual style: clean / minimal — Manrope type, a Mercury-blue header band with a
-Sun-Orange rule, and white rounded "cards" (soft shadow) around the graphics.
+Sun-Orange rule, white rounded "cards" around the graphics, airy charts.
 
 Storage access lives in r2.py; all analysis/rendering lives in processing.py.
 
@@ -56,7 +56,6 @@ URANUS = "#A3BABD"
 CANVAS = "#EDF2F2"
 CARD_BORDER = "#E2E8EA"
 
-# Clean/minimal styling: Manrope, carded graphics, soft shadows, muted palette.
 _APP_CSS = f"""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
@@ -66,12 +65,9 @@ _APP_CSS = f"""
   }}
   .stApp {{ background-color: {CANVAS}; }}
 
-  /* Header band (masthead) */
   .ch-band {{
-      background: {MERCURY};
-      border-bottom: 3px solid {SUN_ORANGE};
-      padding: 16px 26px;
-      margin: -1.2rem -1.2rem 20px -1.2rem;
+      background: {MERCURY}; border-bottom: 3px solid {SUN_ORANGE};
+      padding: 16px 26px; margin: -1.2rem -1.2rem 20px -1.2rem;
       display: flex; align-items: center; gap: 16px;
   }}
   .ch-band img {{ height: 30px; }}
@@ -81,7 +77,6 @@ _APP_CSS = f"""
   }}
   .ch-band .ch-sub {{ color: {URANUS}; font-size: 12.5px; font-weight: 500; }}
 
-  /* Metric "stat cards" */
   div[data-testid="stMetric"] {{
       background: #FFFFFF; border: 1px solid {CARD_BORDER};
       border-radius: 12px; padding: 12px 16px;
@@ -89,20 +84,14 @@ _APP_CSS = f"""
   }}
   div[data-testid="stMetricLabel"] p {{ color: #6b7b82; font-weight: 600; }}
 
-  /* Bordered containers -> rounded white cards with a soft shadow */
   div[data-testid="stVerticalBlockBorderWrapper"] {{
       background: #FFFFFF; border: 1px solid {CARD_BORDER} !important;
       border-radius: 14px !important;
       box-shadow: 0 1px 4px rgba(28,46,54,0.07);
   }}
 
-  /* Section headings */
   h3 {{ color: {MERCURY}; font-weight: 700; letter-spacing: .2px; }}
-
-  /* Primary buttons / download buttons in the accent */
   .stDownloadButton button, .stLinkButton a {{ border-radius: 10px; }}
-
-  /* Sidebar: light, clean */
   section[data-testid="stSidebar"] {{ background: #FFFFFF; border-right: 1px solid {CARD_BORDER}; }}
 </style>
 """
@@ -154,8 +143,6 @@ def check_password():
 #  Threshold helpers
 # --------------------------------------------------------------------------- #
 def _reset_threshold(value):
-    """on_click CALLBACK — runs before the slider is recreated, so assigning to the
-    widget's session_state key is legal."""
     st.session_state["mask_thr"] = value
 
 
@@ -196,7 +183,6 @@ def main():
 
     render_header()
 
-    # ---- Sidebar: dataset + options ---------------------------------- #
     with st.sidebar:
         st.header("Dataset")
         if st.button("↻ Refresh list", help="Re-check storage for datasets"):
@@ -216,7 +202,6 @@ def main():
 
     names = [o["name"] for o in orthos]
     with st.sidebar:
-        # Placeholder default so nothing loads until the user actively picks.
         picked = st.selectbox("Orthomosaic", [PLACEHOLDER] + names, index=0)
         st.divider()
 
@@ -252,7 +237,6 @@ def main():
             help="Clip the analysis to a sub-area. The AOI is drawn on the map for "
                  "context. Leave empty to analyse the whole orthomosaic.")
 
-    # Nothing loads until a real dataset is chosen.
     if picked == PLACEHOLDER:
         st.info("Select a dataset from the sidebar to begin.")
         st.stop()
@@ -260,7 +244,6 @@ def main():
     selected = orthos[names.index(picked)]
     slug = selected["slug"]
 
-    # ---- Load bundle ------------------------------------------------- #
     try:
         with st.spinner("Loading dataset…"):
             bundle = r2.load_bundle(slug)
@@ -301,7 +284,7 @@ def main():
         except Exception as e:
             st.error(f"Could not read the AOI: {e}")
 
-    # ---- Ground threshold (Otsu + slider) + red mask check ----------- #
+    # ---- Ground threshold + red mask check --------------------------- #
     threshold = None
     if ground_mask_on:
         mvals, otsu, lo, hi = setup_threshold(bundle, mask_index_name, aoi_mask)
@@ -345,7 +328,7 @@ def main():
     region = "vegetated canopy" if ground_mask_on else "analysed area"
     vlo, vhi = proc.adaptive_range(vals, info["vmin"], info["vmax"])
 
-    # ---- Classification (before the map so classes can overlay) ------ #
+    # ---- Classification ---------------------------------------------- #
     try:
         labels, edges = proc.classify(vals, method=method, n_classes=n_classes)
     except Exception as e:
@@ -354,30 +337,35 @@ def main():
     class_grid = np.full(idx.shape, -1, dtype="int16")
     class_grid[mask & np.isfinite(idx)] = labels
 
-    # ---- Map card ---------------------------------------------------- #
-    st.markdown(f"### Map — {index_name}")
+    # ---- Map card (index OR classes, never both) --------------------- #
+    st.markdown("### Map")
+    map_choice = st.radio("Show on map", [f"{index_name} index", "Vigour classes"],
+                          horizontal=True, label_visibility="collapsed")
+    layer = "classes" if map_choice == "Vigour classes" else "index"
+
     with st.container(border=True):
         fmap = None
         if HAVE_FOLIUM:
             try:
                 fmap = proc.build_map(bundle, idx, mask, index_name, vlo, vhi,
                                       class_grid=class_grid, n_classes=n_classes,
-                                      aoi_geojson=aoi_geojson)
+                                      aoi_geojson=aoi_geojson, layer=layer)
             except Exception as e:
                 st.caption(f"Map unavailable ({e}); showing static maps.")
                 fmap = None
         if fmap is not None:
             st_folium(fmap, height=560, returned_objects=[],
                       use_container_width=True)
-            st.caption("Toggle the index, the vigour classes, and the basemap in the "
-                       "layer control (top right). Overlay placement is approximate — "
-                       "the georeferenced products are in the downloads.")
+            st.caption("Satellite basemap. Use the radio above to switch between the "
+                       "index and the vigour classes. Overlay placement is "
+                       "approximate — the georeferenced products are in the downloads.")
         else:
-            st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi,
-                                         region=region))
-            st.pyplot(proc.fig_classified_map(class_grid, n_classes))
-            st.caption(f"{index_name} colour scale stretched to this dataset's range "
-                       f"({vlo:.2f}–{vhi:.2f}, 2–98th pct) — qualitative, within-map.")
+            if layer == "classes":
+                st.pyplot(proc.fig_classified_map(class_grid, n_classes))
+            else:
+                st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi,
+                                             region=region))
+            st.caption("Static fallback (map renderer unavailable).")
 
     # ---- Statistics (stat cards) ------------------------------------- #
     st.markdown("### Statistics")
