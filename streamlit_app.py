@@ -176,8 +176,9 @@ def main():
         st.stop()
 
     names = [o["name"] for o in orthos]
+    PLACEHOLDER = "— Select a dataset —"
     with st.sidebar:
-        picked = st.selectbox("Orthomosaic", names, index=0)
+        picked = st.selectbox("Orthomosaic", [PLACEHOLDER] + names, index=0)
         st.divider()
 
         st.header("Index")
@@ -212,6 +213,10 @@ def main():
             help="Clip the analysis to a sub-area. The AOI is drawn on the map for "
                  "context. Leave empty to analyse the whole orthomosaic.")
 
+    if picked == PLACEHOLDER:
+        st.info("Select a dataset from the sidebar to begin.")
+        st.stop()
+ 
     selected = orthos[names.index(picked)]
     slug = selected["slug"]
 
