@@ -15,10 +15,12 @@ Crop-neutral port of the validated offline logic:
   * red ground-mask check over the true-colour preview (cropped to the analysed
     region / AOI so the subset fills the frame)
   * AOI reading (KML / GeoJSON / zipped shapefile) + rasterisation
-  * a folium web map (satellite-only basemap; index AND class overlays loaded but
-    mutually exclusive via a grouped radio control, so only one shows at a time;
-    footprint + AOI + an on-map legend; fits to the AOI when one is given and
-    allows deep zoom for close inspection of the overlay)
+  * a folium web map (satellite-only basemap, with the ortho true-colour image as
+    a persistent context layer beneath the data so there's always a registered
+    backdrop even past the satellite's zoom limit; index AND class overlays loaded
+    but mutually exclusive via a grouped radio control, so only one shows at a
+    time; footprint + AOI + an on-map legend; fits to the AOI when one is given
+    and allows deep zoom for close inspection of the overlay)
   * index GeoTIFF and class shapefile (zipped, with an AUTOMATIC speckle sieve
     scaled to the current map, and a named inner folder) writers for download
 
@@ -515,8 +517,9 @@ def aoi_to_4326_geojson(geom, raster_crs):
 
 
 # --------------------------------------------------------------------------- #
-#  Web map (folium): satellite-only basemap; index + classes loaded but mutually
-#  exclusive (radio) so only one shows at a time and switching needs no reload.
+#  Web map (folium): satellite basemap + persistent true-colour ortho context
+#  layer; index + classes loaded but mutually exclusive (radio) so only one shows
+#  at a time and switching needs no reload.
 # --------------------------------------------------------------------------- #
 def _geojson_bounds(gj):
     """Leaflet-style [[south, west], [north, east]] bounding box of a (EPSG:4326)
@@ -543,6 +546,25 @@ def _geojson_bounds(gj):
     if not lons or not lats:
         return None
     return [[min(lats), min(lons)], [max(lats), max(lons)]]
+
+
+def _rgb_overlay_image(bundle):
+    """RGBA true-colour image of the ortho for use as a PERSISTENT context layer on
+    the web map: real pixels opaque, off-footprint transparent so the satellite
+    basemap shows around it. Because it shares the overlays' exact bounds it stays
+    registered with the index/class layers, and being a real image it gives useful
+    context even past the satellite's native zoom (where the basemap blurs).
+    Returns None if the dataset has no true-colour preview."""
+    valid = bundle.get("valid")
+    if valid is None:
+        return None
+    rgb = _decode_rgb_png(bundle.get("rgb_png"), valid.shape)
+    if rgb is None:
+        return None
+    rgba = np.zeros((*valid.shape, 4), dtype="uint8")
+    rgba[..., :3] = np.clip(rgb * 255.0, 0, 255).astype("uint8")
+    rgba[..., 3] = np.where(valid, 255, 0).astype("uint8")
+    return Image.fromarray(rgba, mode="RGBA")
 
 
 def _legend_html(index_name, vlo, vhi, n_classes):
@@ -578,16 +600,20 @@ def _legend_html(index_name, vlo, vhi, n_classes):
 def build_map(bundle, idx, mask, index_name, vlo, vhi,
               class_grid=None, n_classes=None, aoi_geojson=None):
     """Return a folium.Map, or None if folium is unavailable or the dataset has no
-    WGS84 bounds. Satellite-only basemap. The index and the vigour classes are
-    BOTH added as overlays but placed in one exclusive group (radio buttons), so
-    exactly one is visible at a time and switching is instant (no app reload).
-    Falls back to a plain layer control if GroupedLayerControl isn't available.
+    WGS84 bounds. Satellite basemap, with the ortho true-colour image added as a
+    persistent context layer beneath the data (transparent off-footprint), so there
+    is always a registered backdrop — even past the satellite's zoom limit. The
+    index and the vigour classes are BOTH added as overlays on top, but placed in
+    one exclusive group (radio buttons), so exactly one is visible at a time and
+    switching is instant (no app reload). Falls back to a plain layer control if
+    GroupedLayerControl isn't available.
 
     The view fits to the AOI when one is given (otherwise the whole footprint), and
     deep zoom is allowed (past the satellite's native tile level) so the overlay
     can be inspected closely — the basemap upscales/blurs past native zoom, but the
-    index/class layer stays inspectable. Overlay placement is approximate (exact
-    georeferencing is in the downloads)."""
+    true-colour context layer and the index/class layer stay registered and
+    inspectable. Overlay placement is approximate (exact georeferencing is in the
+    downloads)."""
     bounds = bundle.get("bounds")
     if not bounds or "south" not in bounds:
         return None
@@ -611,6 +637,17 @@ def build_map(bundle, idx, mask, index_name, vlo, vhi,
         attr="Esri World Imagery", name="Satellite", overlay=False, control=True,
         max_zoom=22, max_native_zoom=19,
     ).add_to(m)
+
+    # Persistent true-colour ortho context layer, registered to the same bounds as
+    # the data overlays and sitting just beneath them (zindex 0). Always on, not in
+    # the layer control, so it stays behind whichever overlay is selected and keeps
+    # giving context when the satellite blurs at deep zoom.
+    rgb_ctx = _rgb_overlay_image(bundle)
+    if rgb_ctx is not None:
+        folium.raster_layers.ImageOverlay(
+            image=png_data_uri(rgb_ctx), bounds=img_bounds, opacity=1.0,
+            name="True colour (ortho)", interactive=False, zindex=0,
+            control=False, show=True).add_to(m)
 
     idx_img = colorize_index(idx, mask, vlo, vhi)
     idx_layer = folium.raster_layers.ImageOverlay(
