@@ -24,9 +24,10 @@ Crop-neutral port of the validated offline logic:
     scaled to the current map, and a named inner folder) writers for download
 
 Charts use a clean "airy" style (white ground, faint gridlines, no top/right
-frame, soft bars with an overlaid density curve, no titles, thin reference
-lines). Nothing here reads the multi-GB ortho; it all runs on the small
-precomputed arrays.
+frame, soft bars + an overlaid density curve, no titles). The class histogram is
+coloured by vigour class so it matches the map legend and the class table — one
+palette (class_palette) is the single source of truth across all three. Nothing
+here reads the multi-GB ortho; it all runs on the small precomputed arrays.
 """
 
 import io
@@ -106,12 +107,12 @@ _C_GRID = "#E6ECEE"
 _C_SPINE = "#CBD5D8"
 _C_LABEL = "#5b6b72"
 _C_TITLE = "#1C2E36"
-_C_BAR = "#9ec6e0"        # soft blue for the index histogram
+_C_BAR = "#9ec6e0"        # soft blue for the index histogram (no-class fallback)
 _C_BAR2 = "#cdd8db"       # soft slate for the mask histogram
 _C_CURVE = "#4a6b78"      # density-curve line (desaturated navy)
 _C_OTSU = "#5b8fb0"       # muted blue dotted Otsu line
 _C_THR = "#F46F29"        # Sun Orange for the active threshold (action accent)
-_C_BREAK = "#cf5b4a"      # muted red dashed class breaks
+_C_BREAK = "#cf5b4a"      # muted red dashed class breaks (legacy / unused path)
 
 
 def index_array(bundle, name):
@@ -179,7 +180,11 @@ def canopy_mask(bundle, ground_mask_on, mask_index_name, threshold, aoi_mask=Non
 #  Classification
 # --------------------------------------------------------------------------- #
 def classify(values, method="quartile", n_classes=4):
-    """Integer labels 0..n-1 (0 = lowest, n-1 = highest), plus bin edges/centroids."""
+    """Integer labels 0..n-1 (0 = lowest, n-1 = highest), plus bin edges/centroids.
+
+    NOTE on the second return value: for 'quartile' it is the n_classes-1 break
+    points between classes; for 'kmeans' it is the n_classes sorted cluster
+    centres. fig_histogram handles both (it converts centres to midpoint breaks)."""
     values = np.asarray(values, dtype="float64")
     if method == "quartile":
         qs = np.linspace(0, 100, n_classes + 1)[1:-1]
@@ -324,17 +329,41 @@ def fig_classified_map(class_grid, n_classes):
     return fig
 
 
-def fig_histogram(values, edges, name):
-    """Index distribution — airy bars + density curve, no title, thin lines."""
+def fig_histogram(values, edges, name, n_classes=None):
+    """Index distribution — airy, no title. When n_classes is given the bars are
+    coloured BY VIGOUR CLASS (same palette as the map legend and the class table),
+    so the three views read as one; otherwise a single soft-blue fill is used.
+
+    `edges` is whatever classify() returned: n_classes-1 break points (quartile)
+    or n_classes sorted cluster centres (k-means). Centres are converted to
+    midpoint break points so the colour boundaries and break lines land on the
+    actual class boundaries either way."""
     fig, ax = plt.subplots(figsize=(8, 3.0))
     _apply_airy(ax)
-    ax.hist(values, bins=60, color=_C_BAR, edgecolor="white", linewidth=0.4,
-            alpha=0.55, density=True, zorder=3)
+
+    breaks = np.asarray(edges, dtype="float64").ravel()
+    if n_classes and breaks.size == n_classes and n_classes >= 2:
+        breaks = (breaks[:-1] + breaks[1:]) / 2.0   # k-means centres -> midpoints
+
+    if n_classes:
+        palette = class_palette(n_classes)
+        counts, bedges = np.histogram(values, bins=60, density=True)
+        centers = (bedges[:-1] + bedges[1:]) / 2.0
+        widths = np.diff(bedges)
+        cls = np.clip(np.digitize(centers, breaks), 0, n_classes - 1)
+        colors = [palette[int(c)] for c in cls]
+        ax.bar(centers, counts, width=widths, color=colors, alpha=0.85,
+               edgecolor="white", linewidth=0.3, align="center", zorder=3)
+    else:
+        ax.hist(values, bins=60, color=_C_BAR, edgecolor="white", linewidth=0.4,
+                alpha=0.55, density=True, zorder=3)
+
     dxy = _density_xy(values)
     if dxy is not None:
         ax.plot(dxy[0], dxy[1], color=_C_CURVE, linewidth=1.5, zorder=4)
-    for e in edges:
-        ax.axvline(e, color=_C_BREAK, linestyle=(0, (4, 3)), linewidth=0.8, zorder=5)
+    for e in np.atleast_1d(breaks):
+        ax.axvline(float(e), color=_C_SPINE, linestyle=(0, (4, 3)),
+                   linewidth=0.7, zorder=5)
     ax.set_yticks([])
     ax.set_xlabel(name, color=_C_LABEL, fontsize=9)
     fig.tight_layout()
@@ -602,7 +631,8 @@ def _rgb_overlay_image(bundle):
 
 def _legend_html(index_name, vlo, vhi, n_classes):
     """Fixed legend panel showing BOTH the index gradient and the class swatches
-    (both overlays exist on the map; the user toggles between them client-side)."""
+    (both overlays exist on the map; the user toggles between them client-side).
+    The class swatches use class_palette — the same source as the chart + table."""
     swatches = ""
     if n_classes:
         for c, lab in zip(class_palette(n_classes), class_label_set(n_classes)):

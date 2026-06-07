@@ -7,10 +7,13 @@ Branding + password gate, an ortho dropdown driven live by the R2 bucket (no
 dataset loads until the user actively picks one), then the interactive analysis:
   * bare-earth threshold (Otsu + slider) with a red ground-mask check
   * optional AOI subsetting (upload KML / GeoJSON / zipped shapefile)
-  * a satellite web map with the index and the vigour classes as MUTUALLY
-    EXCLUSIVE overlays (radio in the map's layer control — only one shows, and
-    switching is instant with no app reload), plus an on-map legend + AOI outline
-  * relative-vigour classification (quartile / k-means, 3–5 classes) + table
+  * a satellite web map (with the true-colour ortho as a context layer) showing
+    the index and the vigour classes as MUTUALLY EXCLUSIVE overlays (radio in the
+    map's layer control — only one shows, switching is instant), reprojected to
+    align with the basemap, plus an on-map legend + AOI outline
+  * relative-vigour classification (quartile / k-means, 3–5 classes) + a class
+    table and a class-coloured distribution chart (one palette across map, table,
+    and chart)
   * three downloads: full ortho (presigned URL), index GeoTIFF, class shapefile
     (speckle is sieved out automatically, scaled to the current map; the prepared
     file is invalidated whenever any defining setting changes, so a download is
@@ -97,6 +100,15 @@ _APP_CSS = f"""
   h3 {{ color: {MERCURY}; font-weight: 700; letter-spacing: .2px; }}
   .stDownloadButton button, .stLinkButton a {{ border-radius: 10px; }}
   section[data-testid="stSidebar"] {{ background: #FFFFFF; border-right: 1px solid {CARD_BORDER}; }}
+
+  .ch-card {{
+      max-width: 700px; margin: 6px auto 0; padding: 26px 30px;
+      background: #FFFFFF; border: 1px solid {CARD_BORDER}; border-radius: 14px;
+      box-shadow: 0 1px 4px rgba(28,46,54,0.07);
+  }}
+  .ch-card h2 {{ font-size: 18px; font-weight: 800; color: {MERCURY}; margin: 0 0 6px; }}
+  .ch-card p, .ch-card li {{ color: #46555b; font-size: 14px; line-height: 1.6; }}
+  .ch-card ul {{ margin: 10px 0 0; padding-left: 20px; }}
 </style>
 """
 
@@ -200,8 +212,13 @@ def main():
         st.caption(f"Details: {e}")
         st.stop()
     if not orthos:
-        st.info("No datasets available yet. Upload an orthomosaic bundle to "
-                "storage and it will appear here automatically.")
+        st.markdown(
+            f"""<div class="ch-card">
+              <h2>No datasets yet</h2>
+              <p>Upload an orthomosaic bundle to storage and it will appear in the
+                 sidebar automatically — then refresh the list.</p>
+            </div>""",
+            unsafe_allow_html=True)
         st.stop()
 
     names = [o["name"] for o in orthos]
@@ -242,14 +259,25 @@ def main():
                  "context. Leave empty to analyse the whole orthomosaic.")
 
     if picked == PLACEHOLDER:
-        st.info("Select a dataset from the sidebar to begin.")
+        st.markdown(
+            f"""<div class="ch-card">
+              <h2>Get started</h2>
+              <p>Pick an orthomosaic from the <b>sidebar</b> to begin. This tool turns a
+                 multispectral drone survey into a vigour map you can read at a glance:</p>
+              <ul>
+                <li>See where the canopy is strongest and weakest across the block</li>
+                <li>Focus on a specific area by uploading a boundary (KML, GeoJSON, or shapefile)</li>
+                <li>Export the index and the vigour classes for QGIS or reporting</li>
+              </ul>
+            </div>""",
+            unsafe_allow_html=True)
         st.stop()
 
     selected = orthos[names.index(picked)]
     slug = selected["slug"]
 
     try:
-        with st.spinner("Loading dataset…"):
+        with st.spinner(f"Loading {picked} from storage…"):
             bundle = r2.load_bundle(slug)
     except FileNotFoundError as e:
         st.error("This dataset looks incomplete in storage and can't be loaded.")
@@ -356,10 +384,11 @@ def main():
         if fmap is not None:
             st_folium(fmap, height=560, returned_objects=[],
                       use_container_width=True)
-            st.caption("Satellite basemap. Switch between the index and the vigour "
-                       "classes in the layer control (top right) — only one shows at "
-                       "a time. Overlay placement is approximate; the georeferenced "
-                       "products are in the downloads.")
+            st.caption("Satellite basemap with the true-colour orthomosaic beneath. "
+                       "Switch between the index and the vigour classes in the layer "
+                       "control (top right) — only one shows at a time. Overlays are "
+                       "reprojected to align with the basemap; for survey-grade "
+                       "measurement, use the georeferenced downloads.")
         else:
             st.pyplot(proc.fig_index_map(idx, mask, index_name, vlo, vhi,
                                          region=region))
@@ -369,14 +398,27 @@ def main():
     # ---- Statistics (stat cards) ------------------------------------- #
     st.markdown("### Statistics")
     count = int(mask.sum())
+    low_cnt = int((labels == 0).sum())
+    low_pct = 100.0 * low_cnt / labels.size if labels.size else 0.0
+
+    def _fmt_ha(n_px):
+        if not px_area:
+            return None
+        ha = n_px * px_area / 1e4
+        return f"{ha:,.1f} ha" if ha >= 10 else f"{ha:,.2f} ha"
+
     sc = st.columns(4)
-    sc[0].metric("Analysed pixels", f"{count:,}")
-    if px_area:
-        sc[1].metric("Analysed area", f"{count * px_area / 1e4:,.2f} ha")
-    else:
-        sc[1].metric("Analysed area", "n/a")
-    sc[2].metric(f"Mean {index_name}", f"{np.nanmean(vals):.3f}")
-    sc[3].metric(f"Median {index_name}", f"{np.nanmedian(vals):.3f}")
+    sc[0].metric(
+        "Analysed area", _fmt_ha(count) or "—",
+        help=("Total canopy area included in this analysis." if px_area
+              else "This dataset has no projected CRS, so ground area can't be computed."))
+    sc[1].metric(f"Mean {index_name}", f"{np.nanmean(vals):.3f}")
+    sc[2].metric(f"Median {index_name}", f"{np.nanmedian(vals):.3f}")
+    low_label = proc.class_label_set(n_classes)[0]
+    sc[3].metric(
+        "Priority area", _fmt_ha(low_cnt) or f"{low_pct:.0f}%",
+        help=(f"Area in the lowest vigour class (\u201c{low_label}\u201d) — "
+              f"{low_pct:.0f}% of the analysed area, where to scout first."))
 
     # ---- Classification card ----------------------------------------- #
     st.markdown("### Relative vigour classification")
@@ -384,16 +426,39 @@ def main():
         cc = st.columns([3, 2])
         with cc[0]:
             label_names = proc.class_label_set(n_classes)
-            rows = []
+            palette = proc.class_palette(n_classes)
+            show_area = px_area is not None
+            head_area = ('<th style="padding:6px 10px;text-align:right;">Area (ha)</th>'
+                         if show_area else "")
+            body = ""
             for k in range(n_classes):
                 cnt = int((labels == k).sum())
-                pct = 100.0 * cnt / labels.size
-                area = f"{cnt * px_area / 1e4:,.2f}" if px_area else "n/a"
-                rows.append({"Class": label_names[k], "Pixels": f"{cnt:,}",
-                             "% of area": f"{pct:.1f}%", "Area (ha)": area})
-            st.table(rows)
+                pct = 100.0 * cnt / labels.size if labels.size else 0.0
+                sw = (f'<span style="display:inline-block;width:12px;height:12px;'
+                      f'border-radius:3px;background:{palette[k]};'
+                      f'border:1px solid rgba(0,0,0,0.18);margin-right:8px;'
+                      f'vertical-align:middle;"></span>')
+                area_cell = (f'<td style="padding:6px 10px;text-align:right;">'
+                             f'{cnt * px_area / 1e4:,.2f}</td>') if show_area else ""
+                body += (
+                    '<tr style="border-bottom:1px solid #EEF2F3;">'
+                    f'<td style="padding:6px 10px;">{sw}{label_names[k]}</td>'
+                    f'<td style="padding:6px 10px;text-align:right;">{cnt:,}</td>'
+                    f'<td style="padding:6px 10px;text-align:right;">{pct:.1f}%</td>'
+                    f'{area_cell}</tr>')
+            st.markdown(
+                '<table style="width:100%;border-collapse:collapse;font-size:13px;'
+                'color:#1C2E36;">'
+                '<thead><tr style="border-bottom:2px solid #E2E8EA;color:#6b7b82;'
+                'font-weight:600;text-align:left;">'
+                '<th style="padding:6px 10px;">Vigour class</th>'
+                '<th style="padding:6px 10px;text-align:right;">Pixels</th>'
+                '<th style="padding:6px 10px;text-align:right;">% of area</th>'
+                f'{head_area}</tr></thead><tbody>{body}</tbody></table>',
+                unsafe_allow_html=True)
         with cc[1]:
-            st.pyplot(proc.fig_histogram(vals, edges, index_name))
+            st.pyplot(proc.fig_histogram(vals, edges, index_name,
+                                         n_classes=n_classes))
         st.caption("Classes are relative bands within *this* dataset — a pixel's rank "
                    "in the index distribution, not a health diagnosis. 'Lowest' marks "
                    "where to look first on the ground. Low values can also reflect "
