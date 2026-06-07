@@ -17,8 +17,8 @@ Crop-neutral port of the validated offline logic:
   * a folium web map (satellite-only basemap; index AND class overlays loaded but
     mutually exclusive via a grouped radio control, so only one shows at a time;
     footprint + AOI + an on-map legend)
-  * index GeoTIFF and class shapefile (zipped, with a minimum-area sieve and a
-    named inner folder) writers for download
+  * index GeoTIFF and class shapefile (zipped, with an AUTOMATIC speckle sieve
+    scaled to the current map, and a named inner folder) writers for download
 
 Charts use a clean "airy" style (white ground, faint gridlines, no top/right
 frame, soft bars with an overlaid density curve, no titles, thin reference
@@ -91,6 +91,12 @@ CLASS_LABELS = {
 
 # Gradient stops used for the index colour ramp legend (approximates RdYlGn).
 _RAMP_STOPS = ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"]
+
+# Automatic speckle sieve for the shapefile export: drop blobs smaller than
+# SIEVE_FRACTION of the analysed (classified) area, but always at least
+# SIEVE_FLOOR_PX pixels so trivial specks go even on tiny areas.
+SIEVE_FRACTION = 0.0005   # 0.05% of the classified pixels
+SIEVE_FLOOR_PX = 10
 
 # Airy chart palette
 _C_GRID = "#E6ECEE"
@@ -617,26 +623,24 @@ def index_geotiff_bytes(idx2d, mask, meta):
         return mem.read()
 
 
-def min_area_to_pixels(min_area_ha, meta):
-    """Convert a minimum area in hectares to a pixel count on the display grid,
-    using the dataset's pixel size. Returns 0 if area can't be determined
-    (geographic CRS) or min_area_ha <= 0."""
-    if not min_area_ha or min_area_ha <= 0:
+def auto_sieve_min_pixels(class_grid):
+    """Automatic minimum blob size (pixels) for the shapefile sieve, scaled to the
+    current map: SIEVE_FRACTION of the classified pixel count, with a floor so
+    trivial specks are always removed. Returns 0 if there's nothing to classify."""
+    classified = int((class_grid >= 0).sum())
+    if classified <= 0:
         return 0
-    px = pixel_area_m2(meta)
-    if not px:
-        return 0
-    return int(round(min_area_ha * 1e4 / px))
+    return int(max(SIEVE_FLOOR_PX, round(SIEVE_FRACTION * classified)))
 
 
-def classes_shapefile_zip(class_grid, n_classes, meta, min_area_ha=0.0,
-                          folder_name="vigour_classes"):
+def classes_shapefile_zip(class_grid, n_classes, meta, folder_name="vigour_classes"):
     """Polygonise the class raster and return a ZIPPED shapefile (bytes).
 
-    Speckle below `min_area_ha` (converted to pixels via the dataset's pixel size)
-    is sieved out before polygonising. The shapefile components are written inside
-    a named folder in the archive so it unzips cleanly to one directory.
-    Polygons carry the integer class (0..n-1) and its relative-vigour label."""
+    Speckle is removed AUTOMATICALLY: blobs smaller than a threshold derived from
+    the current classified area (auto_sieve_min_pixels) are dropped — no user
+    input, scales with the map. The shapefile components are written inside a named
+    folder in the archive so it unzips cleanly to one directory. Polygons carry the
+    integer class (0..n-1) and its relative-vigour label."""
     try:
         import geopandas as gpd
         from shapely.geometry import shape
@@ -649,7 +653,7 @@ def classes_shapefile_zip(class_grid, n_classes, meta, min_area_ha=0.0,
     grid = class_grid.astype("int32")
     valid = grid >= 0
 
-    sieve_min_pixels = min_area_to_pixels(min_area_ha, meta)
+    sieve_min_pixels = auto_sieve_min_pixels(grid)
     if sieve_min_pixels and sieve_min_pixels > 1:
         try:
             from scipy import ndimage as ndi
@@ -674,8 +678,7 @@ def classes_shapefile_zip(class_grid, n_classes, meta, min_area_ha=0.0,
         geoms.append(shape(geom))
         recs.append({"class": k, "label": labels[k]})
     if not geoms:
-        raise RuntimeError("No class polygons left to export — try a smaller "
-                           "minimum area.")
+        raise RuntimeError("No class polygons to export.")
 
     gdf = gpd.GeoDataFrame(recs, geometry=geoms, crs=crs)
     tmp = tempfile.mkdtemp()
