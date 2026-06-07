@@ -7,5 +7,5 @@ rasterio
 geopandas
 scikit-learn
 scipy
-folium
+folium>=0.16
 streamlit-folium
