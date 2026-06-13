@@ -467,15 +467,27 @@ def main():
     # ---- Downloads card ---------------------------------------------- #
     st.markdown("### Downloads")
     with st.container(border=True):
-        d1, d2, d3 = st.columns(3)
+        d1, d2, d3, d4 = st.columns(4)
         with d1:
             try:
                 url = r2.ortho_download_url(bundle, ttl=900)
                 st.link_button("⬇ 5-band orthomosaic", url, use_container_width=True)
-                st.caption("Direct from storage; link ~15 min.")
+                st.caption("Full-resolution; link ~15 min.")
             except Exception as e:
                 st.caption(f"Ortho link unavailable: {e}")
         with d2:
+            _rgb_key = meta.get("fullres_rgb_key")
+            if _rgb_key:
+                try:
+                    st.link_button("⬇ True-colour RGB",
+                                   r2.presigned_url(_rgb_key, ttl=900),
+                                   use_container_width=True)
+                    st.caption("Full-resolution; link ~15 min.")
+                except Exception as e:
+                    st.caption(f"RGB link unavailable: {e}")
+            else:
+                st.caption("RGB not yet generated. Run preprocessing with the latest script.")
+        with d3:
             # Full-res index from R2 if available, otherwise display-res fallback
             _fr_key = meta.get(f"fullres_{index_name.lower()}_key")
             if meta.get("has_fullres_indices") and _fr_key:
@@ -483,7 +495,7 @@ def main():
                     st.link_button(f"⬇ {index_name} GeoTIFF",
                                    r2.presigned_url(_fr_key, ttl=900),
                                    use_container_width=True)
-                    st.caption("Full-resolution, georeferenced; link ~15 min.")
+                    st.caption("Full-resolution; link ~15 min.")
                 except Exception as e:
                     st.caption(f"Index download unavailable: {e}")
             else:
@@ -495,7 +507,7 @@ def main():
                     st.caption("Display-resolution, georeferenced.")
                 except Exception as e:
                     st.caption(f"Index export unavailable: {e}")
-        with d3:
+        with d4:
             # Signature of everything that defines the prepared shapefile. If any
             # of it changes, the previously prepared file is stale -> discard it so
             # a download is never served for the wrong settings. (Speckle removal is
