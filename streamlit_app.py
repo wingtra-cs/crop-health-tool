@@ -521,11 +521,28 @@ def main():
                 st.caption("Polygonised, speckle removed, for QGIS.")
             else:
                 st.caption("Prepare to generate a download for the current settings.")
+            # Full-resolution index GeoTIFFs (from preprocessing)
+        if meta.get("has_fullres_indices"):
+            st.markdown("**Full-resolution index GeoTIFFs**")
+            for idx_label, idx_key_name in [
+                ("NDVI GeoTIFF (full res)", "fullres_ndvi_key"),
+                ("NDRE GeoTIFF (full res)", "fullres_ndre_key"),
+                ("CIre GeoTIFF (full res)", "fullres_cire_key"),
+            ]:
+                k = meta.get(idx_key_name)
+                if k:
+                    try:
+                        st.link_button(f"⬇ {idx_label}",
+                                       r2.presigned_url(k, ttl=900),
+                                       use_container_width=True)
+                    except Exception:
+                        pass
+            st.caption("Full-resolution, georeferenced. Link valid ~15 min.")
 
     st.divider()
     st.caption(f"Analysis runs on a ~{meta.get('display_shape',[0,0])[0]}px working "
-               "copy; the index/class downloads are at that resolution, the ortho "
-               "download is full resolution.")
+               "copy; the index/class visualization are at that resolution, the ortho "
+               "and index downloads are full resolution.")
 
 
 if __name__ == "__main__":
