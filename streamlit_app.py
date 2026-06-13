@@ -476,14 +476,25 @@ def main():
             except Exception as e:
                 st.caption(f"Ortho link unavailable: {e}")
         with d2:
-            try:
-                tif = proc.index_geotiff_bytes(idx, mask, meta)
-                st.download_button(f"⬇ {index_name} GeoTIFF", data=tif,
-                                   file_name=f"{slug}_{index_name}.tif",
-                                   mime="image/tiff", use_container_width=True)
-                st.caption("Display-resolution, georeferenced.")
-            except Exception as e:
-                st.caption(f"Index export unavailable: {e}")
+            # Full-res index from R2 if available, otherwise display-res fallback
+            _fr_key = meta.get(f"fullres_{index_name.lower()}_key")
+            if meta.get("has_fullres_indices") and _fr_key:
+                try:
+                    st.link_button(f"⬇ {index_name} GeoTIFF",
+                                   r2.presigned_url(_fr_key, ttl=900),
+                                   use_container_width=True)
+                    st.caption("Full-resolution, georeferenced; link ~15 min.")
+                except Exception as e:
+                    st.caption(f"Index download unavailable: {e}")
+            else:
+                try:
+                    tif = proc.index_geotiff_bytes(idx, mask, meta)
+                    st.download_button(f"⬇ {index_name} GeoTIFF", data=tif,
+                                       file_name=f"{slug}_{index_name}.tif",
+                                       mime="image/tiff", use_container_width=True)
+                    st.caption("Display-resolution, georeferenced.")
+                except Exception as e:
+                    st.caption(f"Index export unavailable: {e}")
         with d3:
             # Signature of everything that defines the prepared shapefile. If any
             # of it changes, the previously prepared file is stale -> discard it so
@@ -521,24 +532,6 @@ def main():
                 st.caption("Polygonised, speckle removed, for QGIS.")
             else:
                 st.caption("Prepare to generate a download for the current settings.")
-
-        # Full-resolution index GeoTIFFs (from preprocessing)
-        if meta.get("has_fullres_indices"):
-            st.markdown("**Full-resolution index GeoTIFFs**")
-            for idx_label, idx_key_name in [
-                ("NDVI GeoTIFF (full res)", "fullres_ndvi_key"),
-                ("NDRE GeoTIFF (full res)", "fullres_ndre_key"),
-                ("CIre GeoTIFF (full res)", "fullres_cire_key"),
-            ]:
-                k = meta.get(idx_key_name)
-                if k:
-                    try:
-                        st.link_button(f"⬇ {idx_label}",
-                                       r2.presigned_url(k, ttl=900),
-                                       use_container_width=True)
-                    except Exception:
-                        pass
-            st.caption("Full-resolution, georeferenced. Link valid ~15 min.")
 
     st.divider()
     st.caption(f"Analysis runs on a ~{meta.get('display_shape',[0,0])[0]}px working "
