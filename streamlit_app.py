@@ -521,7 +521,8 @@ def main():
                 st.caption("Polygonised, speckle removed, for QGIS.")
             else:
                 st.caption("Prepare to generate a download for the current settings.")
-            # Full-resolution index GeoTIFFs (from preprocessing)
+
+        # Full-resolution index GeoTIFFs (from preprocessing)
         if meta.get("has_fullres_indices"):
             st.markdown("**Full-resolution index GeoTIFFs**")
             for idx_label, idx_key_name in [
